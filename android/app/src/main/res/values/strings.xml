@@ -7,4 +7,16 @@
     <string name="backend_stopped">AList 后端已停止</string>
     <string name="notification_channel_name">AList 后端</string>
     <string name="notification_channel_description">保持 AList 本地后端运行</string>
+    <string name="quark_login_title">夸克网页登录</string>
+    <string name="quark_use_current_cookie">使用当前 Cookie</string>
+    <string name="quark_close">关闭</string>
+    <string name="quark_cookie_empty">请在网页中完成登录后再继续</string>
+    <string name="quark_navigation_blocked">已阻止跳转到非夸克站点，请改用手动 Cookie</string>
+    <string name="quark_zoom_out_button">−</string>
+    <string name="quark_zoom_in_button">+</string>
+    <string name="quark_zoom_reset_button">重置</string>
+    <string name="quark_zoom_out_content_description">缩小网页</string>
+    <string name="quark_zoom_in_content_description">放大网页</string>
+    <string name="quark_zoom_reset_content_description">重置网页缩放</string>
+    <string name="quark_zoom_label">网页缩放 %1$d%%</string>
 </resources>

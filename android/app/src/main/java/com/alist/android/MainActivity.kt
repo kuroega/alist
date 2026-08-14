@@ -55,6 +55,12 @@ class MainActivity : Activity() {
         private const val REQUEST_STORAGE = 1002
         private const val PROBE_TIMEOUT_MS = 60_000L
         private const val EXTRA_HTTP_HEADERS = "android.intent.extra.HTTP_HEADERS"
+        private const val QUARK_PAN_URL = "https://pan.quark.cn/"
+        private const val QUARK_DRIVE_URL = "https://drive.quark.cn/"
+        private const val QUARK_MIN_PAGE_ZOOM = 75
+        private const val QUARK_MAX_PAGE_ZOOM = 200
+        private const val QUARK_DEFAULT_PAGE_ZOOM = 100
+        private const val QUARK_PAGE_ZOOM_STEP = 25
     }
 
     private lateinit var root: FrameLayout
@@ -75,6 +81,8 @@ class MainActivity : Activity() {
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
     private var isFullscreen = false
     private var contentInsets = SafeInsets()
+    private var quarkLoginOverlay: View? = null
+    private var quarkLoginWebView: WebView? = null
 
     private data class ExternalPlaybackSpec(
         val url: String,
@@ -137,6 +145,7 @@ class MainActivity : Activity() {
             unregisterReceiver(statusReceiver)
             receiverRegistered = false
         }
+        closeQuarkCookieLogin()
         if (::webView.isInitialized) {
             webView.stopLoading()
             webView.webChromeClient = null
@@ -147,6 +156,10 @@ class MainActivity : Activity() {
 
     @Deprecated("Use back handling in the WebView while retaining framework compatibility")
     override fun onBackPressed() {
+        if (quarkLoginOverlay != null) {
+            closeQuarkCookieLogin()
+            return
+        }
         if (::webView.isInitialized && webView.canGoBack()) {
             webView.goBack()
         } else {
@@ -335,6 +348,7 @@ class MainActivity : Activity() {
                 super.onPageFinished(view, url)
                 if (isLocalUrl(Uri.parse(url))) {
                     installExternalPlaybackControls()
+                    webView.evaluateJavascript(QUARK_COOKIE_SCRIPT, null)
                 }
             }
 
@@ -433,6 +447,253 @@ class MainActivity : Activity() {
         webView.setDownloadListener(DownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
             handleDownload(DownloadSpec(url, userAgent, contentDisposition, mimeType))
         })
+    }
+
+    private fun openQuarkCookieLogin() {
+        if (quarkLoginOverlay != null) return
+
+        val overlay = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+            elevation = dp(4).toFloat()
+        }
+        val toolbar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+        }
+        val title = TextView(this).apply {
+            text = getString(R.string.quark_login_title)
+            textSize = 18f
+            setTextColor(Color.BLACK)
+        }
+        val useCookie = Button(this).apply {
+            text = getString(R.string.quark_use_current_cookie)
+            isAllCaps = false
+        }
+        val close = Button(this).apply {
+            text = getString(R.string.quark_close)
+            isAllCaps = false
+        }
+
+        val loginWebView = WebView(this)
+        var pageZoom = QUARK_DEFAULT_PAGE_ZOOM
+        val zoomToolbar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(dp(8), 0, dp(8), dp(4))
+        }
+        val zoomOut = Button(this).apply {
+            text = getString(R.string.quark_zoom_out_button)
+            contentDescription = getString(R.string.quark_zoom_out_content_description)
+            isAllCaps = false
+        }
+        val zoomLabel = TextView(this).apply {
+            setTextColor(Color.DKGRAY)
+            gravity = Gravity.CENTER
+        }
+        val zoomIn = Button(this).apply {
+            text = getString(R.string.quark_zoom_in_button)
+            contentDescription = getString(R.string.quark_zoom_in_content_description)
+            isAllCaps = false
+        }
+        val zoomReset = Button(this).apply {
+            text = getString(R.string.quark_zoom_reset_button)
+            contentDescription = getString(R.string.quark_zoom_reset_content_description)
+            isAllCaps = false
+        }
+        zoomToolbar.addView(
+            zoomOut,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+        zoomToolbar.addView(
+            zoomLabel,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+        zoomToolbar.addView(
+            zoomIn,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+        zoomToolbar.addView(
+            zoomReset,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+        fun updatePageZoom(nextZoom: Int) {
+            val adjustedZoom = nextZoom.coerceIn(QUARK_MIN_PAGE_ZOOM, QUARK_MAX_PAGE_ZOOM)
+            loginWebView.zoomBy(adjustedZoom.toFloat() / pageZoom)
+            loginWebView.post {
+                if (adjustedZoom > QUARK_DEFAULT_PAGE_ZOOM) {
+                    loginWebView.scrollTo(Int.MAX_VALUE, 0)
+                } else {
+                    loginWebView.scrollTo(0, 0)
+                }
+            }
+            pageZoom = adjustedZoom
+            zoomLabel.text = getString(R.string.quark_zoom_label, pageZoom)
+            zoomOut.isEnabled = pageZoom > QUARK_MIN_PAGE_ZOOM
+            zoomIn.isEnabled = pageZoom < QUARK_MAX_PAGE_ZOOM
+            zoomReset.isEnabled = pageZoom != QUARK_DEFAULT_PAGE_ZOOM
+        }
+        zoomOut.setOnClickListener { updatePageZoom(pageZoom - QUARK_PAGE_ZOOM_STEP) }
+        zoomIn.setOnClickListener { updatePageZoom(pageZoom + QUARK_PAGE_ZOOM_STEP) }
+        zoomReset.setOnClickListener { updatePageZoom(QUARK_DEFAULT_PAGE_ZOOM) }
+        updatePageZoom(QUARK_DEFAULT_PAGE_ZOOM)
+        overlay.addView(
+            toolbar,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+        overlay.addView(
+            zoomToolbar,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+        overlay.addView(
+            loginWebView,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f,
+            ),
+        )
+        quarkLoginOverlay = overlay
+        quarkLoginWebView = loginWebView
+        root.addView(
+            overlay,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            ),
+        )
+
+        useCookie.setOnClickListener {
+            CookieManager.getInstance().flush()
+            val cookie = listOf(
+                CookieManager.getInstance().getCookie(QUARK_PAN_URL),
+                CookieManager.getInstance().getCookie(QUARK_DRIVE_URL),
+            ).mapNotNull { value ->
+                value?.takeIf { it.isNotBlank() }
+            }.joinToString("; ")
+            if (cookie.isBlank()) {
+                showTransientMessage(getString(R.string.quark_cookie_empty))
+                return@setOnClickListener
+            }
+            deliverQuarkCookie(cookie)
+            closeQuarkCookieLogin()
+        }
+        close.setOnClickListener { closeQuarkCookieLogin() }
+
+        configureQuarkLoginWebView(loginWebView)
+        loginWebView.loadUrl(QUARK_PAN_URL)
+    }
+
+    private fun configureQuarkLoginWebView(loginWebView: WebView) {
+        val settings = loginWebView.settings
+        settings.javaScriptEnabled = true
+        settings.domStorageEnabled = true
+        settings.userAgentString = desktopUserAgent(settings.userAgentString)
+        settings.useWideViewPort = true
+        settings.loadWithOverviewMode = true
+        settings.setSupportZoom(true)
+        settings.builtInZoomControls = false
+        settings.displayZoomControls = false
+        settings.allowFileAccess = false
+        settings.allowContentAccess = false
+        settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+        settings.safeBrowsingEnabled = true
+        CookieManager.getInstance().setAcceptCookie(true)
+        CookieManager.getInstance().setAcceptThirdPartyCookies(loginWebView, false)
+        loginWebView.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(
+                view: WebView,
+                request: WebResourceRequest,
+            ): Boolean {
+                if (!request.isForMainFrame) return false
+                return handleQuarkLoginNavigation(request.url, request.hasGesture())
+            }
+
+            @Suppress("DEPRECATION")
+            override fun shouldOverrideUrlLoading(view: WebView, url: String): Boolean {
+                return handleQuarkLoginNavigation(Uri.parse(url), hasGesture = false)
+            }
+
+            override fun onReceivedSslError(
+                view: WebView,
+                handler: SslErrorHandler,
+                error: SslError,
+            ) {
+                handler.cancel()
+            }
+        }
+        loginWebView.webChromeClient = WebChromeClient()
+    }
+
+    private fun handleQuarkLoginNavigation(uri: Uri, hasGesture: Boolean): Boolean {
+        if (uri.scheme != "https") return true
+        val host = uri.host.orEmpty().lowercase()
+        if (host == "quark.cn" || host.endsWith(".quark.cn")) return false
+        if (hasGesture) {
+            openExternal(uri)
+        } else {
+            showTransientMessage(getString(R.string.quark_navigation_blocked))
+        }
+        return true
+    }
+
+    private fun desktopUserAgent(defaultUserAgent: String): String {
+        val chromeVersion = defaultUserAgent
+            .substringAfter("Chrome/", missingDelimiterValue = "")
+            .substringBefore(' ')
+            .takeIf(String::isNotBlank)
+            ?: "133.0.0.0"
+        return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$chromeVersion Safari/537.36"
+    }
+
+    private fun deliverQuarkCookie(cookie: String) {
+        if (!::webView.isInitialized || cookie.isBlank()) return
+        val cookieLiteral = JSONObject.quote(cookie)
+        val script = """
+            (function() {
+              var cookie = $cookieLiteral;
+              if (typeof window.__alistAndroidQuarkCookieReady === "function") {
+                window.__alistAndroidQuarkCookieReady(cookie);
+              } else {
+                window.__alistAndroidQuarkCookiePending = cookie;
+              }
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(script, null)
+    }
+
+    private fun closeQuarkCookieLogin() {
+        quarkLoginOverlay?.let { overlay ->
+            if (::root.isInitialized) root.removeView(overlay)
+        }
+        quarkLoginOverlay = null
+        quarkLoginWebView?.let { loginWebView ->
+            loginWebView.stopLoading()
+            loginWebView.webViewClient = WebViewClient()
+            loginWebView.webChromeClient = null
+            loginWebView.destroy()
+        }
+        quarkLoginWebView = null
     }
 
     private fun restartBackend() {
@@ -719,6 +980,11 @@ class MainActivity : Activity() {
                     ),
                 )
             }
+        }
+
+        @JavascriptInterface
+        fun openQuarkCookieLogin() {
+            activity.runOnUiThread { activity.openQuarkCookieLogin() }
         }
     }
 
