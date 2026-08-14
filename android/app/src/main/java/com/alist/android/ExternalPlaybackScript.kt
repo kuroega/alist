@@ -8,6 +8,41 @@ internal const val EXTERNAL_PLAYBACK_SCRIPT = """
       var overlay;
       var button;
       var activeVideo;
+      var compactVideoControlsClass = "alist-android-compact-video-controls";
+      var compactVideoControlsStyleId = "alist-android-compact-video-controls-style";
+
+      function ensureCompactVideoControlsStyle() {
+        if (document.getElementById(compactVideoControlsStyleId)) return;
+        var style = document.createElement("style");
+        style.id = compactVideoControlsStyleId;
+        style.textContent =
+          ".art-video-player." + compactVideoControlsClass +
+          " .art-control-setting," +
+          ".art-video-player." + compactVideoControlsClass +
+          " .art-control-pip{display:none !important;}";
+        (document.head || document.documentElement).appendChild(style);
+      }
+
+      function updateCompactVideoControls() {
+        ensureCompactVideoControlsStyle();
+        var players = Array.prototype.slice.call(
+          document.querySelectorAll(".art-video-player")
+        );
+        players.forEach(function(player) {
+          var fullscreen = player.querySelector(".art-control-fullscreen");
+          var controls = player.querySelector(".art-controls");
+          if (!fullscreen || !controls) {
+            player.classList.remove(compactVideoControlsClass);
+            return;
+          }
+          player.classList.remove(compactVideoControlsClass);
+          var playerRect = player.getBoundingClientRect();
+          var fullscreenRect = fullscreen.getBoundingClientRect();
+          var overflow = fullscreenRect.right > playerRect.right + 1 ||
+            fullscreenRect.left < playerRect.left - 1;
+          player.classList.toggle(compactVideoControlsClass, overflow);
+        });
+      }
 
       function ensureControls() {
         if (overlay && overlay.parentNode) return;
@@ -74,6 +109,7 @@ internal const val EXTERNAL_PLAYBACK_SCRIPT = """
       function updateControls() {
         if (!document.documentElement) return;
         ensureControls();
+        updateCompactVideoControls();
         activeVideo = findVideo();
         var source = activeVideo && getPlayableSource(activeVideo);
         overlay.style.display = activeVideo && source ? "block" : "none";
@@ -87,6 +123,7 @@ internal const val EXTERNAL_PLAYBACK_SCRIPT = """
       });
       window.setInterval(updateControls, 1000);
       document.addEventListener("fullscreenchange", updateControls);
+      window.addEventListener("resize", updateControls);
       updateControls();
     })();
 """
