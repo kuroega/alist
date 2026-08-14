@@ -17,7 +17,7 @@ android {
         versionName = "0.1.0"
 
         ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
         }
     }
 
@@ -84,7 +84,7 @@ val prepareBackend = tasks.register("prepareBackend") {
             }
         }
 
-        listOf("arm64-v8a", "armeabi-v7a").forEach { abi ->
+        listOf("arm64-v8a", "armeabi-v7a", "x86_64").forEach { abi ->
             val library = outputDirectory.resolve("$abi/libalist.so")
             if (!library.isFile || library.length() == 0L) {
                 throw GradleException("Missing Android JNI library for $abi: $library")

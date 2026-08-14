@@ -475,6 +475,28 @@ class MainActivity : Activity() {
             text = getString(R.string.quark_close)
             isAllCaps = false
         }
+        toolbar.addView(
+            title,
+            LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f,
+            ),
+        )
+        toolbar.addView(
+            useCookie,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+        toolbar.addView(
+            close,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
 
         val loginWebView = WebView(this)
         var pageZoom = QUARK_DEFAULT_PAGE_ZOOM

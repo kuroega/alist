@@ -8,7 +8,7 @@
     <string name="notification_channel_name">AList 后端</string>
     <string name="notification_channel_description">保持 AList 本地后端运行</string>
     <string name="quark_login_title">夸克网页登录</string>
-    <string name="quark_use_current_cookie">使用当前 Cookie</string>
+    <string name="quark_use_current_cookie">解析并回填 Cookie</string>
     <string name="quark_close">关闭</string>
     <string name="quark_cookie_empty">请在网页中完成登录后再继续</string>
     <string name="quark_navigation_blocked">已阻止跳转到非夸克站点，请改用手动 Cookie</string>

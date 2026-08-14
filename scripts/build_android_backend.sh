@@ -170,6 +170,7 @@ prepare_web
 BUILD_OUTPUT="$(mktemp -d "${TMPDIR:-/tmp}/alist-android-output.XXXXXX")"
 build_abi arm64-v8a arm64 "" "$TOOLCHAIN/bin/aarch64-linux-android${ANDROID_API}-clang"
 build_abi armeabi-v7a arm 7 "$TOOLCHAIN/bin/armv7a-linux-androideabi${ANDROID_API}-clang"
+build_abi x86_64 amd64 "" "$TOOLCHAIN/bin/x86_64-linux-android${ANDROID_API}-clang"
 
 rm -rf "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR"
