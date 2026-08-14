@@ -19,6 +19,9 @@ import android.os.SystemClock
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
+import android.view.WindowInsetsController
+import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.DownloadListener
 import android.webkit.JavascriptInterface
@@ -70,6 +73,8 @@ class MainActivity : Activity() {
     private var receiverRegistered = false
     private var customView: View? = null
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
+    private var isFullscreen = false
+    private var contentInsets = SafeInsets()
 
     private data class ExternalPlaybackSpec(
         val url: String,
@@ -85,6 +90,12 @@ class MainActivity : Activity() {
         val contentDisposition: String?,
         val mimeType: String?,
     )
+    private data class SafeInsets(
+        val left: Int = 0,
+        val top: Int = 0,
+        val right: Int = 0,
+        val bottom: Int = 0,
+    )
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -97,6 +108,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        configureWindow()
         buildUi()
         configureWebView()
         registerStatusReceiver()
@@ -174,7 +186,9 @@ class MainActivity : Activity() {
     }
 
     private fun buildUi() {
-        root = FrameLayout(this)
+        root = FrameLayout(this).apply {
+            setBackgroundColor(Color.WHITE)
+        }
         webView = WebView(this)
         root.addView(
             webView,
@@ -212,7 +226,96 @@ class MainActivity : Activity() {
             ),
         )
         setContentView(root)
+        root.setOnApplyWindowInsetsListener { _, insets ->
+            contentInsets = readSafeInsets(insets)
+            if (!isFullscreen) applyContentInsets()
+            insets
+        }
+        root.requestApplyInsets()
         showStarting()
+    }
+    private fun configureWindow() {
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isStatusBarContrastEnforced = false
+            window.isNavigationBarContrastEnforced = false
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.setDecorFitsSystemWindows(false)
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = baseSystemUiVisibility()
+        }
+    }
+
+    private fun baseSystemUiVisibility(): Int {
+        var flags = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            flags = flags or View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            flags = flags or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        }
+        return flags
+    }
+
+    private fun readSafeInsets(insets: WindowInsets): SafeInsets {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val bars = insets.getInsets(
+                WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout(),
+            )
+            return SafeInsets(bars.left, bars.top, bars.right, bars.bottom)
+        }
+        @Suppress("DEPRECATION")
+        return SafeInsets(
+            insets.systemWindowInsetLeft,
+            insets.systemWindowInsetTop,
+            insets.systemWindowInsetRight,
+            insets.systemWindowInsetBottom,
+        )
+    }
+
+    private fun applyContentInsets() {
+        root.setPadding(
+            contentInsets.left,
+            contentInsets.top,
+            contentInsets.right,
+            contentInsets.bottom,
+        )
+    }
+
+    private fun enterFullscreenWindow() {
+        isFullscreen = true
+        root.setPadding(0, 0, 0, 0)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.insetsController?.let { controller ->
+                controller.systemBarsBehavior =
+                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                controller.hide(WindowInsets.Type.systemBars())
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = baseSystemUiVisibility() or
+                View.SYSTEM_UI_FLAG_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+        }
+    }
+
+    private fun exitFullscreenWindow() {
+        isFullscreen = false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.insetsController?.show(WindowInsets.Type.systemBars())
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = baseSystemUiVisibility()
+        }
+        applyContentInsets()
+        root.requestApplyInsets()
     }
 
     private fun configureWebView() {
@@ -320,7 +423,7 @@ class MainActivity : Activity() {
                     ),
                 )
                 webView.visibility = View.GONE
-                window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_FULLSCREEN
+                enterFullscreenWindow()
             }
 
             override fun onHideCustomView() {
@@ -567,7 +670,7 @@ class MainActivity : Activity() {
         customViewCallback?.onCustomViewHidden()
         customViewCallback = null
         webView.visibility = View.VISIBLE
-        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+        exitFullscreenWindow()
     }
 
     private fun registerStatusReceiver() {
