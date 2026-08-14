@@ -29,6 +29,16 @@ if [[ ! -f "$APP_ROOT/go.mod" || ! -f "$APP_ROOT/public/public.go" ]]; then
   printf 'script must run from an AList source tree: %s\n' "$APP_ROOT" >&2
   exit 1
 fi
+if [[ ! -f "$APP_ROOT/.env" ]]; then
+  printf 'missing Android password configuration: %s/.env\n' "$APP_ROOT" >&2
+  exit 1
+fi
+# shellcheck disable=SC1091
+source "$APP_ROOT/.env"
+if [[ -z "${ALIST_ANDROID_ADMIN_PASSWORD:-}" ]]; then
+  printf 'ALIST_ANDROID_ADMIN_PASSWORD is not set in %s/.env\n' "$APP_ROOT" >&2
+  exit 1
+fi
 
 DOWNLOAD_DIR=""
 WEB_WORK=""
@@ -127,12 +137,12 @@ build_abi() {
   if [[ "$goarch" == "arm" ]]; then
     GOOS=android GOARCH="$goarch" GOARM="$goarm" CGO_ENABLED=1 CC="$compiler" \
       go build -buildmode=c-shared -o "$output" \
-      -ldflags="-w -s -X github.com/alist-org/alist/v3/internal/conf.WebVersion=$WEB_VERSION" \
+      -ldflags="-w -s -X github.com/alist-org/alist/v3/internal/conf.WebVersion=$WEB_VERSION -X github.com/alist-org/alist/v3/internal/conf.AndroidAdminPassword=$ALIST_ANDROID_ADMIN_PASSWORD" \
       -tags=jsoniter .
   else
     GOOS=android GOARCH="$goarch" CGO_ENABLED=1 CC="$compiler" \
       go build -buildmode=c-shared -o "$output" \
-      -ldflags="-w -s -X github.com/alist-org/alist/v3/internal/conf.WebVersion=$WEB_VERSION" \
+      -ldflags="-w -s -X github.com/alist-org/alist/v3/internal/conf.WebVersion=$WEB_VERSION -X github.com/alist-org/alist/v3/internal/conf.AndroidAdminPassword=$ALIST_ANDROID_ADMIN_PASSWORD" \
       -tags=jsoniter .
   fi
   rm -f "$BUILD_OUTPUT/$abi/libalist.h"

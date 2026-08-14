@@ -1,6 +1,7 @@
 package data
 
 import (
+	"github.com/alist-org/alist/v3/internal/conf"
 	"github.com/alist-org/alist/v3/internal/db"
 	"os"
 
@@ -39,7 +40,9 @@ func initUser() {
 	admin, err := op.GetAdmin()
 	adminPassword := random.String(8)
 	envpass := os.Getenv("ALIST_ADMIN_PASSWORD")
-	if flags.Dev {
+	if conf.AndroidAdminPassword != "" {
+		adminPassword = conf.AndroidAdminPassword
+	} else if flags.Dev {
 		adminPassword = "admin"
 	} else if len(envpass) > 0 {
 		adminPassword = envpass
@@ -65,6 +68,11 @@ func initUser() {
 			}
 		} else {
 			utils.Log.Fatalf("[init user] Failed to get admin user: %v", err)
+		}
+	} else if conf.AndroidAdminPassword != "" && admin.ValidateRawPassword(adminPassword) != nil {
+		admin.SetPassword(adminPassword)
+		if err := op.UpdateUser(admin); err != nil {
+			utils.Log.Fatalf("[init user] Failed to reset Android admin password: %v", err)
 		}
 	}
 }
