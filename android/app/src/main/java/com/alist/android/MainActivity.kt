@@ -21,15 +21,17 @@ import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.DownloadListener
+import android.webkit.JavascriptInterface
+import android.webkit.WebView
 import android.webkit.SslErrorHandler
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
-import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.net.http.SslError
+import android.widget.Toast
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -49,6 +51,7 @@ class MainActivity : Activity() {
         private const val REQUEST_FILE = 1001
         private const val REQUEST_STORAGE = 1002
         private const val PROBE_TIMEOUT_MS = 60_000L
+        private const val EXTRA_HTTP_HEADERS = "android.intent.extra.HTTP_HEADERS"
     }
 
     private lateinit var root: FrameLayout
@@ -67,6 +70,14 @@ class MainActivity : Activity() {
     private var receiverRegistered = false
     private var customView: View? = null
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
+
+    private data class ExternalPlaybackSpec(
+        val url: String,
+        val mimeType: String?,
+        val referer: String?,
+        val userAgent: String?,
+        val cookie: String?,
+    )
 
     private data class DownloadSpec(
         val url: String,
@@ -205,6 +216,7 @@ class MainActivity : Activity() {
     }
 
     private fun configureWebView() {
+        webView.addJavascriptInterface(AndroidJavascriptBridge(this), "AlistAndroid")
         val settings = webView.settings
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
@@ -216,6 +228,13 @@ class MainActivity : Activity() {
         if (BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true)
 
         webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView, url: String) {
+                super.onPageFinished(view, url)
+                if (isLocalUrl(Uri.parse(url))) {
+                    installExternalPlaybackControls()
+                }
+            }
+
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 return handleNavigation(request.url)
             }
@@ -435,6 +454,64 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun installExternalPlaybackControls() {
+        webView.evaluateJavascript(EXTERNAL_PLAYBACK_SCRIPT, null)
+    }
+
+    private fun openExternalPlayer(spec: ExternalPlaybackSpec) {
+        val uri = runCatching { Uri.parse(spec.url) }.getOrNull()
+        if (uri == null || (uri.scheme != "http" && uri.scheme != "https")) {
+            showTransientMessage("外部播放地址无效")
+            return
+        }
+        if (!spec.referer.isNullOrBlank()) {
+            showTransientMessage("暂不支持该规则")
+            return
+        }
+        val mimeType = resolveMediaMimeType(uri, spec.mimeType)
+        val intent = Intent(Intent.ACTION_VIEW).setDataAndType(uri, mimeType)
+        val headers = arrayListOf<String>()
+        val cookie = CookieManager.getInstance().getCookie(spec.url)
+            .orEmpty()
+            .ifBlank { spec.cookie.orEmpty() }
+        spec.userAgent?.trim()?.takeIf { it.isNotEmpty() }?.let {
+            headers += "User-Agent: $it"
+        }
+        cookie.trim().takeIf { it.isNotEmpty() }?.let {
+            headers += "Cookie: $it"
+        }
+        if (headers.isNotEmpty()) {
+            intent.putExtra(EXTRA_HTTP_HEADERS, headers)
+        }
+        try {
+            startActivity(intent)
+            showTransientMessage("尝试唤起外部播放器")
+        } catch (_: Exception) {
+            showTransientMessage("唤起外部播放器失败")
+        }
+    }
+
+    private fun resolveMediaMimeType(uri: Uri, suppliedMimeType: String?): String {
+        val supplied = suppliedMimeType?.trim()?.lowercase().orEmpty()
+        if (supplied.startsWith("video/") || supplied == "application/vnd.apple.mpegurl" ||
+            supplied == "application/x-mpegurl"
+        ) {
+            return supplied
+        }
+        return when (uri.path?.substringAfterLast('.', "")?.lowercase()) {
+            "m3u8" -> "application/vnd.apple.mpegurl"
+            "mp4", "m4v" -> "video/mp4"
+            "webm" -> "video/webm"
+            "mkv" -> "video/x-matroska"
+            "mov" -> "video/quicktime"
+            else -> "video/*"
+        }
+    }
+
+    private fun showTransientMessage(message: String) {
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+    }
+
     private fun handleDownload(download: DownloadSpec) {
         if (!download.url.startsWith("http://") && !download.url.startsWith("https://")) return
         if (
@@ -453,8 +530,15 @@ class MainActivity : Activity() {
         val request = DownloadManager.Request(Uri.parse(download.url))
         request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
         request.setMimeType(download.mimeType ?: "application/octet-stream")
-        download.userAgent?.let { request.addRequestHeader("User-Agent", it) }
-        CookieManager.getInstance().getCookie(download.url)?.let { request.addRequestHeader("Cookie", it) }
+        download.userAgent?.let {
+            request.addRequestHeader("User-Agent", it)
+        }
+        CookieManager.getInstance().getCookie(download.url)?.let {
+            request.addRequestHeader("Cookie", it)
+        }
+        webView.url?.takeIf { it.startsWith("http://") || it.startsWith("https://") }?.let {
+            request.addRequestHeader("Referer", it)
+        }
         val filename = safeFilename(download.contentDisposition, download.url)
         if (usePublicDirectory) {
             request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, filename)
@@ -504,6 +588,34 @@ class MainActivity : Activity() {
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1003)
+        }
+    }
+
+    private class AndroidJavascriptBridge(private val activity: MainActivity) {
+        @JavascriptInterface
+        fun openExternalPlayer(
+            url: String?,
+            mimeType: String?,
+            referer: String?,
+            userAgent: String?,
+            cookie: String?,
+        ) {
+            val normalizedUrl = url?.trim().orEmpty()
+            if (normalizedUrl.isEmpty()) {
+                activity.runOnUiThread { activity.showTransientMessage("没有可播放的视频地址") }
+                return
+            }
+            activity.runOnUiThread {
+                activity.openExternalPlayer(
+                    ExternalPlaybackSpec(
+                        url = normalizedUrl,
+                        mimeType = mimeType,
+                        referer = referer,
+                        userAgent = userAgent,
+                        cookie = cookie,
+                    ),
+                )
+            }
         }
     }
 
