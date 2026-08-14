@@ -1,0 +1,17 @@
+AList Android App
+
+AList backend
+- Repository: https://github.com/AlistGo/alist
+- License: GNU Affero General Public License v3.0
+- Corresponding source: provide the complete modified AList source tree and Android build scripts with every distributed APK.
+
+AList web frontend
+- Repository: https://github.com/AlistGo/alist-web
+- The upstream package.json declares MIT. Verify the upstream license files and include their current notices when updating the embedded dist.
+
+Embedded web release
+- Version: 3.63.0
+- Release: https://github.com/AlistGo/alist-web/releases/tag/3.63.0
+
+Third-party notices
+- The embedded frontend includes third-party JavaScript, fonts, media, and WASM assets. Their individual notices remain in the upstream distribution and must be retained when replacing public/dist.

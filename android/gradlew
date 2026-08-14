@@ -1,0 +1,38 @@
+#!/usr/bin/env sh
+set -eu
+
+APP_HOME=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+GRADLE_VERSION=8.9
+if command -v gradle >/dev/null 2>&1; then
+    exec gradle "$@"
+fi
+
+GRADLE_USER_HOME=${GRADLE_USER_HOME:-"$HOME/.gradle"}
+GRADLE_DIR="$GRADLE_USER_HOME/wrapper/dists/alist-gradle-$GRADLE_VERSION/gradle-$GRADLE_VERSION"
+GRADLE_BIN="$GRADLE_DIR/bin/gradle"
+
+if [ ! -x "$GRADLE_BIN" ]; then
+    CACHE_DIR="$GRADLE_USER_HOME/wrapper/dists/alist-gradle-$GRADLE_VERSION"
+    TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/alist-gradle.XXXXXX")
+    trap 'rm -rf "$TMP_DIR"' EXIT HUP INT TERM
+    ARCHIVE="$TMP_DIR/gradle-$GRADLE_VERSION-bin.zip"
+    URL="https://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip"
+    mkdir -p "$CACHE_DIR"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fL --retry 3 --retry-delay 2 "$URL" -o "$ARCHIVE"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -O "$ARCHIVE" "$URL"
+    else
+        printf '%s\n' 'Gradle 8.9 is not cached and curl/wget is unavailable.' >&2
+        exit 1
+    fi
+    if ! command -v unzip >/dev/null 2>&1; then
+        printf '%s\n' 'Gradle 8.9 is not cached and unzip is unavailable.' >&2
+        exit 1
+    fi
+    unzip -q "$ARCHIVE" -d "$TMP_DIR"
+    rm -rf "$GRADLE_DIR"
+    mv "$TMP_DIR/gradle-$GRADLE_VERSION" "$GRADLE_DIR"
+fi
+
+exec "$GRADLE_BIN" "$@"

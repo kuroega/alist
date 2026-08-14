@@ -1,0 +1,64 @@
+name: android app
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "android/**"
+      - "android_bridge.go"
+      - "cmd/server_runner.go"
+      - "scripts/build_android_backend.sh"
+      - "public/**"
+      - "go.mod"
+      - "go.sum"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  debug-apk:
+    name: Build debug APK
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.0"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Build Android JNI libraries
+        run: bash scripts/build_android_backend.sh "$RUNNER_TEMP/alist-android-jniLibs"
+
+      - name: Assemble debug APK
+        working-directory: android
+        run: ./gradlew :app:assembleDebug -PbackendDir="$RUNNER_TEMP/alist-android-jniLibs"
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: alist-android-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk

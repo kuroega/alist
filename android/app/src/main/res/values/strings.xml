@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">AList</string>
+    <string name="backend_starting">正在启动 AList 后端…</string>
+    <string name="backend_failed">AList 后端启动失败</string>
+    <string name="backend_retry">重试</string>
+    <string name="backend_running">AList 后端运行中</string>
+    <string name="backend_stopped">AList 后端已停止</string>
+    <string name="notification_channel_name">AList 后端</string>
+    <string name="notification_channel_description">保持 AList 本地后端运行</string>
+</resources>

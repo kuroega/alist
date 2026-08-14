@@ -1,0 +1,7 @@
+.gradle/
+local.properties
+build/
+app/build/
+app/src/main/jniLibs/
+app/build/generated/backend-jniLibs/
+*.iml

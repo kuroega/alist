@@ -1,0 +1,528 @@
+package com.alist.android
+
+import android.Manifest
+import android.app.Activity
+import android.app.DownloadManager
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.graphics.Color
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Environment
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.webkit.CookieManager
+import android.webkit.DownloadListener
+import android.webkit.SslErrorHandler
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.net.http.SslError
+import android.widget.Button
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.ProgressBar
+import android.widget.TextView
+import org.json.JSONObject
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLDecoder
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+
+class MainActivity : Activity() {
+    companion object {
+        private const val REQUEST_FILE = 1001
+        private const val REQUEST_STORAGE = 1002
+        private const val PROBE_TIMEOUT_MS = 60_000L
+    }
+
+    private lateinit var root: FrameLayout
+    private lateinit var webView: WebView
+    private lateinit var progress: ProgressBar
+    private lateinit var status: TextView
+    private lateinit var retry: Button
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val probeExecutor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "alist-readiness").apply { isDaemon = true }
+    }
+    private val probing = AtomicBoolean(false)
+    private var endpoint: BackendEndpoint? = null
+    private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
+    private var pendingDownload: DownloadSpec? = null
+    private var receiverRegistered = false
+    private var customView: View? = null
+    private var customViewCallback: WebChromeClient.CustomViewCallback? = null
+
+    private data class DownloadSpec(
+        val url: String,
+        val userAgent: String?,
+        val contentDisposition: String?,
+        val mimeType: String?,
+    )
+
+    private val statusReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val error = intent?.getStringExtra(AlistService.EXTRA_ERROR)
+            if (!error.isNullOrBlank()) {
+                showFailure(error)
+            }
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        buildUi()
+        configureWebView()
+        registerStatusReceiver()
+        requestNotificationPermission()
+        startBackend()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (!receiverRegistered) registerStatusReceiver()
+    }
+
+    override fun onStop() {
+        if (receiverRegistered) {
+            unregisterReceiver(statusReceiver)
+            receiverRegistered = false
+        }
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        probing.set(false)
+        probeExecutor.shutdownNow()
+        mainHandler.removeCallbacksAndMessages(null)
+        if (receiverRegistered) {
+            unregisterReceiver(statusReceiver)
+            receiverRegistered = false
+        }
+        if (::webView.isInitialized) {
+            webView.stopLoading()
+            webView.webChromeClient = null
+            webView.destroy()
+        }
+        super.onDestroy()
+    }
+
+    @Deprecated("Use back handling in the WebView while retaining framework compatibility")
+    override fun onBackPressed() {
+        if (::webView.isInitialized && webView.canGoBack()) {
+            webView.goBack()
+        } else {
+            super.onBackPressed()
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_FILE) {
+            val callback = fileChooserCallback ?: return
+            fileChooserCallback = null
+            val uris = when {
+                resultCode != RESULT_OK -> null
+                data?.clipData != null -> Array(data.clipData!!.itemCount) { index ->
+                    data.clipData!!.getItemAt(index).uri
+                }
+                data?.data != null -> arrayOf(data.data!!)
+                else -> null
+            }
+            callback.onReceiveValue(uris)
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_STORAGE) {
+            val download = pendingDownload ?: return
+            pendingDownload = null
+            val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+            enqueueDownload(download, usePublicDirectory = granted)
+        }
+    }
+
+    private fun buildUi() {
+        root = FrameLayout(this)
+        webView = WebView(this)
+        root.addView(
+            webView,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            ),
+        )
+
+        val overlay = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(24), dp(24), dp(24), dp(24))
+        }
+        progress = ProgressBar(this)
+        status = TextView(this).apply {
+            setTextColor(Color.DKGRAY)
+            textSize = 16f
+            gravity = Gravity.CENTER
+            setPadding(0, dp(16), 0, dp(16))
+        }
+        retry = Button(this).apply {
+            text = getString(R.string.backend_retry)
+            visibility = View.GONE
+            setOnClickListener { restartBackend() }
+        }
+        overlay.addView(progress)
+        overlay.addView(status)
+        overlay.addView(retry)
+        root.addView(
+            overlay,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        setContentView(root)
+        showStarting()
+    }
+
+    private fun configureWebView() {
+        val settings = webView.settings
+        settings.javaScriptEnabled = true
+        settings.domStorageEnabled = true
+        settings.databaseEnabled = true
+        settings.allowFileAccess = false
+        settings.allowContentAccess = true
+        settings.cacheMode = WebSettings.LOAD_DEFAULT
+        CookieManager.getInstance().setAcceptCookie(true)
+        if (BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true)
+
+        webView.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                return handleNavigation(request.url)
+            }
+
+            @Suppress("DEPRECATION")
+            override fun shouldOverrideUrlLoading(view: WebView, url: String): Boolean {
+                return handleNavigation(Uri.parse(url))
+            }
+
+            override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: SslError) {
+                handler.cancel()
+            }
+
+            override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+                if (request.isForMainFrame) {
+                    showFailure(error.description?.toString() ?: getString(R.string.backend_failed))
+                }
+            }
+        }
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onShowFileChooser(
+                view: WebView,
+                callback: ValueCallback<Array<Uri>>,
+                params: FileChooserParams,
+            ): Boolean {
+                fileChooserCallback?.onReceiveValue(null)
+                fileChooserCallback = callback
+                val intent = try {
+                    params.createIntent().apply {
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                } catch (_: Exception) {
+                    Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                        type = "*/*"
+                        putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                    }
+                }
+                return try {
+                    startActivityForResult(intent, REQUEST_FILE)
+                    true
+                } catch (_: Exception) {
+                    fileChooserCallback = null
+                    false
+                }
+            }
+
+            override fun onCreateWindow(
+                view: WebView,
+                isDialog: Boolean,
+                isUserGesture: Boolean,
+                resultMsg: android.os.Message,
+            ): Boolean {
+                val popup = WebView(this@MainActivity)
+                popup.settings.javaScriptEnabled = true
+                popup.settings.domStorageEnabled = true
+                popup.webViewClient = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(popupView: WebView, request: WebResourceRequest): Boolean {
+                        openExternal(request.url)
+                        popupView.destroy()
+                        return true
+                    }
+                }
+                val transport = resultMsg.obj as? WebView.WebViewTransport ?: return false
+                transport.webView = popup
+                resultMsg.sendToTarget()
+                return true
+            }
+
+            override fun onShowCustomView(view: View, callback: CustomViewCallback) {
+                if (customView != null) {
+                    callback.onCustomViewHidden()
+                    return
+                }
+                customView = view
+                customViewCallback = callback
+                root.addView(
+                    view,
+                    FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+                webView.visibility = View.GONE
+                window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_FULLSCREEN
+            }
+
+            override fun onHideCustomView() {
+                exitFullscreen()
+            }
+        }
+        webView.setDownloadListener(DownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
+            handleDownload(DownloadSpec(url, userAgent, contentDisposition, mimeType))
+        })
+    }
+
+    private fun restartBackend() {
+        probing.set(false)
+        val stopIntent = Intent(this, AlistService::class.java).setAction(AlistService.ACTION_STOP)
+        runCatching { startService(stopIntent) }
+        mainHandler.postDelayed({ startBackend() }, 500)
+    }
+    private fun startBackend() {
+        if (!probing.compareAndSet(false, true)) return
+        showStarting()
+        val dataDir = File(filesDir, "alist")
+        val preparedEndpoint = try {
+            BackendConfig.prepare(dataDir)
+        } catch (error: Throwable) {
+            probing.set(false)
+            showFailure(error.message ?: error.javaClass.simpleName)
+            return
+        }
+        endpoint = preparedEndpoint
+        val intent = Intent(this, AlistService::class.java).setAction(AlistService.ACTION_START)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+        } catch (error: Throwable) {
+            probing.set(false)
+            showFailure(error.message ?: error.javaClass.simpleName)
+            return
+        }
+
+        probeExecutor.execute {
+            val deadline = SystemClock.elapsedRealtime() + PROBE_TIMEOUT_MS
+            var ready = false
+            var lastError = ""
+            while (probing.get() && SystemClock.elapsedRealtime() < deadline) {
+                try {
+                    val ping = request(preparedEndpoint.pingUrl)
+                    if (ping.status == HttpURLConnection.HTTP_OK && ping.body.trim() == "pong") {
+                        val settings = request(preparedEndpoint.settingsUrl)
+                        if (settings.status == HttpURLConnection.HTTP_OK && JSONObject(settings.body).optInt("code", -1) == 200) {
+                            ready = true
+                            break
+                        }
+                        lastError = "后端正在加载存储"
+                    } else {
+                        lastError = "后端尚未就绪"
+                    }
+                } catch (error: Throwable) {
+                    lastError = error.message ?: error.javaClass.simpleName
+                }
+                try {
+                    Thread.sleep(250)
+                } catch (_: InterruptedException) {
+                    break
+                }
+            }
+            mainHandler.post {
+                probing.set(false)
+                if (ready) {
+                    webView.visibility = View.VISIBLE
+                    progress.visibility = View.GONE
+                    status.visibility = View.GONE
+                    retry.visibility = View.GONE
+                    webView.loadUrl(preparedEndpoint.baseUrl)
+                } else {
+                    val nativeError = runCatching { NativeBridge().lastError() }.getOrNull().orEmpty()
+                    showFailure(
+                        listOf(lastError, nativeError)
+                            .firstOrNull { it.isNotBlank() }
+                            ?: "超过 ${PROBE_TIMEOUT_MS / 1000} 秒仍未就绪",
+                    )
+                }
+            }
+        }
+    }
+
+    private data class ProbeResponse(val status: Int, val body: String)
+
+    private fun request(url: String): ProbeResponse {
+        val connection = URL(url).openConnection() as HttpURLConnection
+        connection.requestMethod = "GET"
+        connection.connectTimeout = 2_000
+        connection.readTimeout = 2_000
+        connection.instanceFollowRedirects = false
+        connection.useCaches = false
+        return try {
+            val status = connection.responseCode
+            val stream = if (status in 200..399) connection.inputStream else connection.errorStream
+            val body = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            ProbeResponse(status, body)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun handleNavigation(uri: Uri): Boolean {
+        return if (isLocalUrl(uri)) {
+            false
+        } else {
+            openExternal(uri)
+            true
+        }
+    }
+
+    private fun isLocalUrl(uri: Uri): Boolean {
+        val currentEndpoint = endpoint ?: return false
+        val path = uri.path ?: "/"
+        val basePath = currentEndpoint.basePath
+        val pathMatches = basePath == "/" || path == basePath || path.startsWith("$basePath/")
+        return uri.scheme == "http" && uri.host == "127.0.0.1" && uri.port == currentEndpoint.port && pathMatches
+    }
+
+    private fun openExternal(uri: Uri) {
+        if (uri.scheme != "http" && uri.scheme != "https") return
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, uri))
+        } catch (_: Exception) {
+            showFailure("无法打开外部链接: $uri")
+        }
+    }
+
+    private fun handleDownload(download: DownloadSpec) {
+        if (!download.url.startsWith("http://") && !download.url.startsWith("https://")) return
+        if (
+            Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
+            checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingDownload = download
+            requestPermissions(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE), REQUEST_STORAGE)
+            return
+        }
+        enqueueDownload(download, usePublicDirectory = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q || checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun enqueueDownload(download: DownloadSpec, usePublicDirectory: Boolean) {
+        val request = DownloadManager.Request(Uri.parse(download.url))
+        request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+        request.setMimeType(download.mimeType ?: "application/octet-stream")
+        download.userAgent?.let { request.addRequestHeader("User-Agent", it) }
+        CookieManager.getInstance().getCookie(download.url)?.let { request.addRequestHeader("Cookie", it) }
+        val filename = safeFilename(download.contentDisposition, download.url)
+        if (usePublicDirectory) {
+            request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, filename)
+        } else {
+            request.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, filename)
+        }
+        try {
+            getSystemService(DownloadManager::class.java).enqueue(request)
+        } catch (error: Exception) {
+            showFailure(error.message ?: "无法创建下载任务")
+        }
+    }
+
+    private fun safeFilename(contentDisposition: String?, url: String): String {
+        val fromHeader = contentDisposition
+            ?.let { Regex("filename\\*?=(?:UTF-8''|\\\"?)([^\\\";]+)", RegexOption.IGNORE_CASE).find(it)?.groupValues?.getOrNull(1) }
+            ?.let { runCatching { URLDecoder.decode(it, "UTF-8") }.getOrNull() }
+        val fromUrl = Uri.parse(url).lastPathSegment
+        val candidate = (fromHeader ?: fromUrl ?: "download").trim().ifBlank { "download" }
+        return candidate.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(180)
+    }
+
+    private fun exitFullscreen() {
+        customView?.let { root.removeView(it) }
+        customView = null
+        customViewCallback?.onCustomViewHidden()
+        customViewCallback = null
+        webView.visibility = View.VISIBLE
+        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+    }
+
+    private fun registerStatusReceiver() {
+        if (receiverRegistered) return
+        val filter = IntentFilter(AlistService.ACTION_STATUS)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(statusReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(statusReceiver, filter)
+        }
+        receiverRegistered = true
+    }
+
+    private fun requestNotificationPermission() {
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1003)
+        }
+    }
+
+    private fun showStarting() {
+        progress.visibility = View.VISIBLE
+        status.visibility = View.VISIBLE
+        retry.visibility = View.GONE
+        status.text = getString(R.string.backend_starting)
+    }
+
+    private fun showFailure(message: String) {
+        if (!::status.isInitialized) return
+        progress.visibility = View.GONE
+        webView.visibility = View.GONE
+        status.visibility = View.VISIBLE
+        retry.visibility = View.VISIBLE
+        val logPath = File(filesDir, "alist/log/log.log").absolutePath
+        status.text = "${getString(R.string.backend_failed)}\n$message\n日志：$logPath"
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+}
