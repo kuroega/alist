@@ -1,4 +1,5 @@
 import Foundation
+import Network
 
 struct StoredConnection: Equatable, Sendable {
     let baseURL: URL
@@ -54,7 +55,7 @@ enum ServerURLValidator {
               components.scheme != nil else {
             throw AListAPIError.invalidServerURL
         }
-        guard components.scheme?.lowercased() == "https" else {
+        guard isAllowedConnection(scheme: components.scheme, host: components.host) else {
             throw AListAPIError.insecureURL
         }
         guard let host = components.host, !host.isEmpty,
@@ -75,4 +76,41 @@ enum ServerURLValidator {
         }
         return normalized
     }
+
+    static func isAllowedConnection(scheme: String?, host: String?) -> Bool {
+        guard let scheme = scheme?.lowercased() else { return false }
+        if scheme == "https" {
+            return true
+        }
+#if DEBUG
+        return scheme == "http" && host.map(isPrivateHost) == true
+#else
+        return false
+#endif
+    }
+
+#if DEBUG
+    private static func isPrivateHost(_ host: String) -> Bool {
+        let normalized = host.lowercased()
+        if normalized == "localhost" || normalized.hasSuffix(".local") {
+            return true
+        }
+
+        if let address = IPv4Address(normalized) {
+            let octets = address.rawValue
+            return octets[0] == 10
+                || octets[0] == 127
+                || (octets[0] == 169 && octets[1] == 254)
+                || (octets[0] == 172 && (16 ... 31).contains(octets[1]))
+                || (octets[0] == 192 && octets[1] == 168)
+        }
+
+        guard let address = IPv6Address(normalized) else { return false }
+        let octets = address.rawValue
+        let isLoopback = octets.dropLast().allSatisfy { $0 == 0 } && octets.last == 1
+        let isUniqueLocal = octets[0] & 0xfe == 0xfc
+        let isLinkLocal = octets[0] == 0xfe && octets[1] & 0xc0 == 0x80
+        return isLoopback || isUniqueLocal || isLinkLocal
+    }
+#endif
 }

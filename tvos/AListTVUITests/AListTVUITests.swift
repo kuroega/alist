@@ -25,6 +25,32 @@ final class AListTVUITests: XCTestCase {
         XCTAssertTrue(app.buttons["browser.item./Sample.mp4"].exists)
     }
 
+    func testSwitchesBetweenCardAndListViews() {
+        login(username: "alice")
+        let viewMode = app.buttons["browser.view-mode"]
+        XCTAssertTrue(viewMode.waitForExistence(timeout: 3))
+        let initialLabel = viewMode.label
+        XCTAssertTrue(["List view", "Card view"].contains(initialLabel))
+
+        focusAndSelect(viewMode, direction: .up)
+
+        XCTAssertNotEqual(app.buttons["browser.view-mode"].label, initialLabel)
+        XCTAssertTrue(app.buttons["browser.item./Shows"].exists)
+    }
+
+    func testSortMenuShowsCriteriaAndDirection() {
+        login(username: "alice")
+        let sort = app.buttons["browser.sort"]
+        XCTAssertTrue(sort.waitForExistence(timeout: 3))
+
+        focusAndSelect(sort, direction: .up)
+
+        XCTAssertTrue(app.buttons["Name"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["Modified date"].exists)
+        XCTAssertTrue(app.buttons["Size"].exists)
+        XCTAssertTrue(app.buttons["Ascending"].exists || app.buttons["Descending"].exists)
+    }
+
     func testOTPChallengeThenLogin() {
         loginForm(username: "otp")
         focusAndSelect(app.buttons["connection.connect"], direction: .down)

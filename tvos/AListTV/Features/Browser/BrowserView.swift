@@ -9,6 +9,10 @@ struct BrowserView: View {
 
 
     @FocusState private var focusedPath: String?
+    @AppStorage("com.alist.tv.browser-list-view") private var isListView = false
+    @AppStorage("com.alist.tv.browser-sort-criterion") private var sortCriterionRaw = BrowserSortCriterion.name.rawValue
+    @AppStorage("com.alist.tv.browser-sort-ascending") private var isSortAscending = true
+    @State private var isSortDialogPresented = false
 
     private let columns = [
         GridItem(.adaptive(minimum: 280, maximum: 360), spacing: 36)
@@ -27,7 +31,11 @@ struct BrowserView: View {
                 case .forbidden where viewModel.items.isEmpty:
                     retryState(title: "You do not have permission to open this folder")
                 default:
-                    grid
+                    if isListView {
+                        list
+                    } else {
+                        grid
+                    }
                 }
             }
             .navigationTitle(viewModel.path)
@@ -37,10 +45,36 @@ struct BrowserView: View {
                         Button("Back") { viewModel.moveToParent() }
                     }
                 }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button {
+                        isListView.toggle()
+                    } label: {
+                        Image(systemName: isListView ? "rectangle.grid.2x2" : "list.bullet")
+                    }
+                    .accessibilityLabel(isListView ? "Card view" : "List view")
+                    .accessibilityIdentifier("browser.view-mode")
+
+
+                    Button {
+                        isSortDialogPresented = true
+                    } label: {
+                        Image(systemName: "arrow.up.arrow.down")
+                    }
+                    .accessibilityLabel("Sort files")
+                    .accessibilityIdentifier("browser.sort")
                     Button("Sign Out", action: onLogout)
                         .accessibilityIdentifier("browser.logout")
                 }
+            }
+        }
+        .confirmationDialog("Sort files", isPresented: $isSortDialogPresented, titleVisibility: .visible) {
+            ForEach(BrowserSortCriterion.allCases, id: \.self) { criterion in
+                Button(criterion.title) {
+                    sortCriterionRaw = criterion.rawValue
+                }
+            }
+            Button(isSortAscending ? "Descending" : "Ascending") {
+                isSortAscending.toggle()
             }
         }
         .alert(
@@ -55,7 +89,14 @@ struct BrowserView: View {
             Text(logoutError ?? "")
         }
         .onAppear {
+            applySort()
             if viewModel.state == .idle { viewModel.loadInitial() }
+        }
+        .onChange(of: sortCriterionRaw) { _, _ in
+            applySort()
+        }
+        .onChange(of: isSortAscending) { _, _ in
+            applySort()
         }
         .onChange(of: focusedPath) { _, value in
             viewModel.focusedVirtualPath = value
@@ -88,20 +129,50 @@ struct BrowserView: View {
                     .accessibilityValue(focusedPath == item.virtualPath ? "focused" : "")
                 }
 
-                switch viewModel.state {
-                case .loadingMore:
-                    focusableStatus(title: "Loading more…", identifier: "browser.loading-more")
-                case .loadMoreFailed:
-                    Button("Retry loading more") { viewModel.retry() }
-                        .accessibilityIdentifier("browser.retry-more")
-                case .forbidden:
-                    Button("Permission denied — retry") { viewModel.retry() }
-                        .accessibilityIdentifier("browser.retry-forbidden")
-                default:
-                    EmptyView()
-                }
+                paginationStatus
             }
             .padding(60)
+        }
+    }
+
+    private var list: some View {
+        ScrollView {
+            LazyVStack(spacing: 16) {
+                ForEach(viewModel.items) { item in
+                    Button {
+                        viewModel.open(item)
+                    } label: {
+                        BrowserListRow(
+                            item: item,
+                            artwork: viewModel.artwork(for: item),
+                            loadArtwork: { viewModel.loadArtwork(for: item) }
+                        )
+                    }
+                    .buttonStyle(.card)
+                    .focused($focusedPath, equals: item.virtualPath)
+                    .accessibilityIdentifier("browser.item.\(item.virtualPath ?? item.name)")
+                    .accessibilityValue(focusedPath == item.virtualPath ? "focused" : "")
+                }
+
+                paginationStatus
+            }
+            .padding(60)
+        }
+    }
+
+    @ViewBuilder
+    private var paginationStatus: some View {
+        switch viewModel.state {
+        case .loadingMore:
+            focusableStatus(title: "Loading more…", identifier: "browser.loading-more")
+        case .loadMoreFailed:
+            Button("Retry loading more") { viewModel.retry() }
+                .accessibilityIdentifier("browser.retry-more")
+        case .forbidden:
+            Button("Permission denied — retry") { viewModel.retry() }
+                .accessibilityIdentifier("browser.retry-forbidden")
+        default:
+            EmptyView()
         }
     }
 
@@ -117,6 +188,10 @@ struct BrowserView: View {
         Button(title) {}
             .accessibilityIdentifier(identifier)
     }
+
+    private func applySort() {
+        viewModel.setSort(criterion: BrowserSortCriterion(rawValue: sortCriterionRaw) ?? .name, ascending: isSortAscending)
+    }
 }
 
 private struct BrowserCard: View {
@@ -127,7 +202,7 @@ private struct BrowserCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            thumbnail
+            BrowserThumbnail(item: item, artwork: artwork, loadArtwork: loadArtwork)
                 .frame(height: 170)
                 .frame(maxWidth: .infinity)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 18))
@@ -141,18 +216,48 @@ private struct BrowserCard: View {
         }
         .padding(18)
     }
+}
+
+private struct BrowserListRow: View {
+    let item: AListObject
+    let artwork: UIImage?
+    let loadArtwork: () -> Void
+
+    var body: some View {
+        HStack(spacing: 24) {
+            BrowserThumbnail(item: item, artwork: artwork, loadArtwork: loadArtwork)
+                .frame(width: 160, height: 90)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text(item.name)
+                    .font(.headline)
+                    .lineLimit(1)
+                Text(item.isDirectory ? "Folder" : ByteCountFormatter.string(fromByteCount: item.size, countStyle: .file))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+        }
+        .padding(18)
+    }
+}
+
+private struct BrowserThumbnail: View {
+    let item: AListObject
+    let artwork: UIImage?
+    let loadArtwork: () -> Void
 
     @ViewBuilder
-    private var thumbnail: some View {
+    var body: some View {
         if let artwork {
             Image(uiImage: artwork)
                 .resizable()
                 .scaledToFill()
         } else if let value = item.thumbnail,
-                  let components = URLComponents(string: value),
-                  components.scheme?.lowercased() == "https",
-                  components.host != nil,
-                  let url = components.url {
+                  let url = try? PlayableURLValidator.validate(value) {
             AsyncImage(url: url) { phase in
                 switch phase {
                 case let .success(image):

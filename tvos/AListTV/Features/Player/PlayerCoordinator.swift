@@ -6,8 +6,8 @@ enum PlayableURLValidator {
         let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty,
               let components = URLComponents(string: value),
-              components.scheme?.lowercased() == "https",
               let host = components.host, !host.isEmpty,
+              ServerURLValidator.isAllowedConnection(scheme: components.scheme, host: host),
               components.user == nil,
               components.password == nil,
               let url = components.url else {

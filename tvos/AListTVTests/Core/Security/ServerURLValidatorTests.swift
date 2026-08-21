@@ -13,6 +13,22 @@ final class ServerURLValidatorTests: XCTestCase {
         )
     }
 
+#if DEBUG
+    func testAcceptsHTTPOnlyForPrivateDebugServers() throws {
+        XCTAssertEqual(
+            try ServerURLValidator.validate("http://10.0.0.2:5244/").absoluteString,
+            "http://10.0.0.2:5244"
+        )
+        XCTAssertEqual(
+            try ServerURLValidator.validate("http://media-server.local:5244").absoluteString,
+            "http://media-server.local:5244"
+        )
+        assertError(.insecureURL, value: "http://203.0.113.1:5244")
+        assertError(.insecureURL, value: "http://10.0.0.1.example.com:5244")
+        assertError(.insecureURL, value: "http://fc.example.com:5244")
+    }
+#endif
+
     func testRejectsHTTPAndRelativeURLs() {
         assertError(.insecureURL, value: "http://alist.example")
         assertError(.invalidServerURL, value: "/relative/path")

@@ -2,6 +2,23 @@ import Combine
 import Foundation
 import UIKit
 
+enum BrowserSortCriterion: String, CaseIterable, Hashable {
+    case name
+    case modified
+    case size
+
+    var title: String {
+        switch self {
+        case .name:
+            return "Name"
+        case .modified:
+            return "Modified date"
+        case .size:
+            return "Size"
+        }
+    }
+}
+
 @MainActor
 final class BrowserViewModel: ObservableObject {
     enum State: Equatable {
@@ -25,6 +42,8 @@ final class BrowserViewModel: ObservableObject {
     @Published private(set) var path = "/"
     @Published private(set) var items: [AListObject] = []
     @Published var focusedVirtualPath: String?
+    @Published private(set) var sortCriterion: BrowserSortCriterion = .name
+    @Published private(set) var isSortAscending = true
     @Published private(set) var hasMore = false
     @Published private(set) var artworkRevision = 0
 
@@ -121,6 +140,13 @@ final class BrowserViewModel: ObservableObject {
         } else {
             beginLoading(path: path, restoredFocus: pendingRestoredFocus)
         }
+    }
+
+    func setSort(criterion: BrowserSortCriterion, ascending: Bool) {
+        guard sortCriterion != criterion || isSortAscending != ascending else { return }
+        sortCriterion = criterion
+        isSortAscending = ascending
+        updateItems()
     }
 
     func artwork(for object: AListObject) -> UIImage? {
@@ -263,7 +289,28 @@ final class BrowserViewModel: ObservableObject {
                 fileItems.append(normalized)
             }
         }
-        items = directoryItems + fileItems
+        updateItems()
+    }
+
+    private func updateItems() {
+        items = sorted(directoryItems) + sorted(fileItems)
+    }
+
+    private func sorted(_ objects: [AListObject]) -> [AListObject] {
+        objects.sorted { lhs, rhs in
+            let result: ComparisonResult
+            switch sortCriterion {
+            case .name:
+                result = lhs.name.localizedStandardCompare(rhs.name)
+            case .modified:
+                result = (lhs.modified ?? "").compare(rhs.modified ?? "")
+            case .size:
+                result = lhs.size == rhs.size
+                    ? lhs.name.localizedStandardCompare(rhs.name)
+                    : (lhs.size < rhs.size ? .orderedAscending : .orderedDescending)
+            }
+            return isSortAscending ? result == .orderedAscending : result == .orderedDescending
+        }
     }
 
     private static func message(for error: Error) -> String {

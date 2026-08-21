@@ -35,6 +35,20 @@ final class PlayerCoordinatorTests: XCTestCase {
         XCTAssertTrue(player.replacedURLs.isEmpty)
     }
 
+#if DEBUG
+    func testAcceptsPrivateHTTPRawURLButRejectsLookalikeHost() throws {
+        XCTAssertEqual(
+            try PlayableURLValidator.validate("http://10.0.0.2:5244/video.mp4").absoluteString,
+            "http://10.0.0.2:5244/video.mp4"
+        )
+        XCTAssertThrowsError(
+            try PlayableURLValidator.validate("http://10.0.0.2.example.com:5244/video.mp4")
+        ) { error in
+            XCTAssertEqual(error as? AListAPIError, .invalidRawURL)
+        }
+    }
+#endif
+
     func testDirectoryDoesNotRequestGet() async {
         let api = PlayerFakeAPI(details: [])
         let coordinator = makeCoordinator(api: api, player: PlayerFakeController())

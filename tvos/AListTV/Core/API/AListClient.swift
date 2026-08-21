@@ -121,9 +121,11 @@ actor AListClient: AListAPI {
         authenticated: Bool
     ) throws -> URLRequest {
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false),
-              components.scheme?.lowercased() == "https",
-              components.host?.isEmpty == false else {
+              let host = components.host, !host.isEmpty else {
             throw AListAPIError.invalidServerURL
+        }
+        guard ServerURLValidator.isAllowedConnection(scheme: components.scheme, host: host) else {
+            throw AListAPIError.insecureURL
         }
         let prefix = components.path == "/" ? "" : components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         components.path = "/" + ([prefix, path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))]

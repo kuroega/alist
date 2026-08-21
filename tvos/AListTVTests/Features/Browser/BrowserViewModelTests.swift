@@ -35,6 +35,33 @@ final class BrowserViewModelTests: XCTestCase {
         XCTAssertEqual(calls, [ListCall(path: "/", page: 1, perPage: 200)])
     }
 
+    func testSortsEachDirectoryPartitionBySelectedCriterionAndDirection() async throws {
+        let page = DirectoryPage(content: [
+            object("file-large", size: 20, modified: "2026-08-04T00:00:00Z"),
+            object("folder-small", directory: true, size: 1, modified: "2026-08-03T00:00:00Z"),
+            object("file-small", size: 10, modified: "2026-08-02T00:00:00Z"),
+            object("folder-large", directory: true, size: 100, modified: "2026-08-01T00:00:00Z")
+        ], hasMore: false, page: 1, perPage: 200)
+        let api = BrowserFakeAPI(responses: [.success(path: "/", page: 1, value: page)])
+        let viewModel = BrowserViewModel(api: api)
+
+        viewModel.loadInitial()
+        try await waitUntil { viewModel.state == .loaded }
+        viewModel.setSort(criterion: .size, ascending: false)
+
+        XCTAssertEqual(
+            viewModel.items.map(\.name),
+            ["folder-large", "folder-small", "file-large", "file-small"]
+        )
+
+        viewModel.setSort(criterion: .modified, ascending: true)
+
+        XCTAssertEqual(
+            viewModel.items.map(\.name),
+            ["folder-large", "folder-small", "file-small", "file-large"]
+        )
+    }
+
     func testPaginationDeduplicates() async throws {
         let first = DirectoryPage(content: [object("a", directory: true), object("b", directory: false)], hasMore: true, page: 1, perPage: 2)
         let second = DirectoryPage(content: [object("b", directory: false), object("c", directory: true)], hasMore: false, page: 2, perPage: 2)
@@ -136,8 +163,19 @@ final class BrowserViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.state, .loaded)
     }
 
-    private func object(_ name: String, directory: Bool = false) -> AListObject {
-        AListObject(virtualPath: "/\(name)", name: name, isDirectory: directory)
+    private func object(
+        _ name: String,
+        directory: Bool = false,
+        size: Int64 = 0,
+        modified: String? = nil
+    ) -> AListObject {
+        AListObject(
+            virtualPath: "/\(name)",
+            name: name,
+            size: size,
+            isDirectory: directory,
+            modified: modified
+        )
     }
 
     private func waitUntil(
