@@ -46,7 +46,7 @@ final class AppContainer: ObservableObject {
                     tokenProvider: { sessionStore.currentToken }
                 )
             }
-            controllerFactory = { AVPlayerControllerAdapter() }
+            controllerFactory = { VLCPlayerControllerAdapter() }
         }
 #else
         let sessionStore = SessionCredentialStore(backing: KeychainCredentialStore())
@@ -59,7 +59,7 @@ final class AppContainer: ObservableObject {
                 tokenProvider: { sessionStore.currentToken }
             )
         }
-        controllerFactory = { AVPlayerControllerAdapter() }
+        controllerFactory = { VLCPlayerControllerAdapter() }
 #endif
 
         self.controllerFactory = controllerFactory

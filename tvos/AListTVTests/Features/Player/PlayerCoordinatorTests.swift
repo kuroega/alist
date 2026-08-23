@@ -116,7 +116,7 @@ final class PlayerCoordinatorTests: XCTestCase {
         XCTAssertEqual(paths, ["/a.mp4", "/a.mp4", "/b.mp4", "/b.mp4"])
     }
 
-    func testRestoresSavedProgressBeforePlay() async {
+    func testStartsFromBeginningDespiteSavedProgress() async {
         let suite = "PlayerCoordinatorTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defaults.removePersistentDomain(forName: suite)
@@ -129,7 +129,7 @@ final class PlayerCoordinatorTests: XCTestCase {
 
         await coordinator.play(object: object("/video.mp4"))
 
-        XCTAssertEqual(player.seekValues, [60])
+        XCTAssertTrue(player.seekValues.isEmpty)
         XCTAssertEqual(player.playCount, 1)
     }
 

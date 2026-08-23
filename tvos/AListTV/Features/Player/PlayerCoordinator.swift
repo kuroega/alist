@@ -81,7 +81,6 @@ final class PlayerCoordinator: ObservableObject {
             guard sessionID == activeSession else { return }
             let url = try PlayableURLValidator.validate(detail.rawURL)
             controller.replaceCurrentItem(url: url)
-            await restoreProgress()
             guard sessionID == activeSession else { return }
             controller.play()
             state = .playing
@@ -169,16 +168,6 @@ final class PlayerCoordinator: ObservableObject {
         }
     }
 
-    private func restoreProgress() async {
-        guard let identity = progressIdentity,
-              let record = progressStore.record(for: identity),
-              record.position >= 30,
-              record.duration > 0,
-              record.position / record.duration < 0.9 else {
-            return
-        }
-        await controller.seek(to: record.position)
-    }
 
     private func finishMonitoring(saveProgress shouldSave: Bool) {
         if shouldSave { saveProgress() }
