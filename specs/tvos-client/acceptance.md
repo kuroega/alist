@@ -1,6 +1,6 @@
 # AListTV Acceptance Map
 
-Automated names are stable contract names. Manual scenarios are required only where AVKit, TLS trust, redirect/range behavior, or physical focus behavior cannot be established by unit tests.
+Automated names are stable contract names. Manual scenarios are required only where VLC decoding, TLS trust, redirect/range behavior, or physical focus behavior cannot be established by unit tests.
 
 | Requirement | Automated evidence | Simulator / Apple TV acceptance |
 |---|---|---|
@@ -15,6 +15,10 @@ Automated names are stable contract names. Manual scenarios are required only wh
 | TVOS-PLAY-001 | `PlayerCoordinatorTests.testGetPrecedesItemCreation`, `testRejectsInsecureAndEmptyRawURL` | AList `/p` media starts; an HTTP fixture URL is rejected without a request downgrade. |
 | TVOS-PLAY-002 | `PlayerCoordinatorTests.testFirstFailureRefreshesAndRestores`, `testSecondFailureDoesNotRefresh`, `testNewObjectResetsRetryBudget` | Expire the first signed URL; exactly one fresh `/api/fs/get` is observed. |
 | TVOS-PLAY-003 | `PlaybackProgressStoreTests` and coordinator resume tests | Play past 30 seconds, exit, reopen and observe resume; play past 90%, reopen and observe no resume. |
+| TVOS-PLAY-004 | `PlayerControllerModelTests.testSeekTargetClamping`; `AListTVUITests.testVisibleSeekButtonsMoveExactlyTenSeconds` | On Simulator and Apple TV, exercise Remote left/right and visible controls at the middle and boundaries. |
+| TVOS-PLAY-005 | `PlayerCoordinatorTests.testExternalSubtitleDiscoveryPaginationAndOrdering`; `AListTVUITests.testSubtitleSelectionJourney` | Select Off, embedded, matching external, and unrelated external subtitles while video continues. |
+| TVOS-PLAY-006 | `AListTVUITests.testAudioSelectionJourney` | Select each embedded audio track without playback restart. |
+| TVOS-PLAY-007 | `PlayerControllerModelTests.testDiagnosticsFormattingOmitsSensitiveValues`; `AListTVUITests.testDiagnosticsToggleJourney` | Toggle diagnostics and inspect the rendered accessibility tree for sensitive values. |
 | TVOS-SEC-001 | Release Info.plist inspection and URL validator tests | A trusted HTTPS server succeeds; self-signed HTTPS and HTTP raw media fail. Console contains no password, OTP, token, or signed raw URL. |
 
 ## UI fixture journeys
@@ -30,6 +34,6 @@ The `ui-testing` launch argument runs the real view models and navigation agains
 Run on a tvOS 17+ simulator or Apple TV against AList 3.52 or later:
 
 1. `/p` proxy URL: start, pause, seek, exit, and resume.
-2. Cloud storage 302 and 307 direct URLs: Range playback, seeking, and return work through AVKit.
-3. Media with subtitle and alternate audio tracks: both appear in the system AVKit menus.
+2. Cloud storage 302 and 307 direct URLs: Range playback, seeking, and return work through the playback controller.
+3. Media with subtitle and alternate audio tracks: both appear in the custom VLC-backed menus.
 4. First temporary URL expired: only one fs/get refresh occurs; a second item failure surfaces an error.

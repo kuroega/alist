@@ -42,15 +42,31 @@ This document is the normative behavior source for the tvOS 17 milestone. The te
 
 ### TVOS-PLAY-001 — Fresh secure playable URL
 
-**Given** a non-directory item is selected, **when** playback begins, **then** the client MUST call `/api/fs/get` for its `virtual_path`, validate the returned `raw_url` as an absolute HTTPS URL, and pass it to AVKit. Empty, relative, or HTTP URLs MUST produce an unplayable state and MUST NOT downgrade to plaintext. Directory objects MUST be rejected without calling `/api/fs/get`.
+**Given** a non-directory item is selected, **when** playback begins, **then** the client MUST call `/api/fs/get` for its `virtual_path`, validate the returned `raw_url` as an absolute HTTPS URL, and pass it to the playback controller. Empty, relative, or HTTP URLs MUST produce an unplayable state and MUST NOT downgrade to plaintext. Directory objects MUST be rejected without calling `/api/fs/get`.
 
 ### TVOS-PLAY-002 — One-time URL refresh
 
-**Given** the current `AVPlayerItem` first reaches `.failed`, **when** the failure event is observed, **then** the client MUST call `/api/fs/get` exactly once more, validate and replace the item, and seek to the pre-failure position. A second failure in the same play session MUST stop automatic retry and expose the readable underlying error. A new selected object starts a new retry budget.
+**Given** the current playback item first reaches a failure state, **when** the failure event is observed, **then** the client MUST call `/api/fs/get` exactly once more, validate and replace the playback item, and seek to the pre-failure position. A second failure in the same play session MUST stop automatic retry and expose the readable underlying error. A new selected object starts a new retry budget.
 
 ### TVOS-PLAY-003 — Resume progress
 
 **Given** active playback, **when** ten seconds elapse, playback pauses, or the player exits, **then** position and duration MUST be evaluated for persistence. A finite duration greater than zero and position at least 30 seconds but below 90% MUST be saved and restored on the next play. Progress at or above 90% MUST be deleted. Identity MUST contain the normalized base URL, username, and `virtual_path`; at most the 500 most recently updated records are retained.
+
+### TVOS-PLAY-004 — Ten-second seeking
+
+**Given** seekable playback, **when** the focused playback surface receives Siri Remote left/right or the user activates visible rewind/forward controls, **then** position MUST move by exactly minus/plus ten seconds and clamp to zero and known duration. Directional focus movement among controls MUST NOT seek.
+
+### TVOS-PLAY-005 — Subtitle selection
+
+**Given** playback with embedded subtitle tracks or supported same-directory subtitle files, **when** the subtitle menu is opened, **then** it MUST offer Off, embedded tracks, and all discovered external files with matching video basenames first. Loading or selecting an external subtitle MUST NOT delay or stop video playback. Errors MUST be non-fatal and preserve the active subtitle.
+
+### TVOS-PLAY-006 — Audio track selection
+
+**Given** playback has multiple embedded audio tracks, **when** the user selects a track, **then** the player MUST switch to it without restarting, pausing, or dismissing playback.
+
+### TVOS-PLAY-007 — Non-sensitive diagnostics
+
+**Given** a playback session, **when** the user enables diagnostics, **then** a toggleable panel MUST show timing, demux, video, and audio/subtitle counters and metadata no more than once per second. The rendered panel MUST NOT contain URLs, hosts, request headers, credentials, cookies, or tokens.
 
 ## Transport security
 

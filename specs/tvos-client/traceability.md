@@ -13,4 +13,8 @@
 | TVOS-PLAY-001 | `PlayerCoordinator.play(object:)`, `PlayableURLValidator.validate(_:)` | `PlayerCoordinatorTests.testGetPrecedesItemCreation`; `testRejectsInsecureAndEmptyRawURL`; `/p` manual playback |
 | TVOS-PLAY-002 | `PlayerCoordinator.handleFailure(_:)` | `PlayerCoordinatorTests.testFirstFailureRefreshesAndRestores`; `testSecondFailureDoesNotRefresh`; expiring URL scenario |
 | TVOS-PLAY-003 | `PlaybackProgressStore.update(identity:position:duration:)`, `PlayerCoordinator.restoreProgress()` | `PlaybackProgressStoreTests`; resume and 90% manual scenarios |
+| TVOS-PLAY-004 | `PlaybackChrome.seek(by:)`, `VLCPlayerControllerAdapter.seek(to:)` | `PlayerControllerModelTests.testSeekTargetClamping`; visible controls and Remote manual scenario |
+| TVOS-PLAY-005 | `PlayerCoordinator.discoverExternalSubtitles(session:path:)`, `PlayerCoordinator.selectSubtitle(_:)`, `VLCPlayerControllerAdapter.addExternalSubtitle(url:id:title:)` | `PlayerCoordinatorTests` discovery/selection cases; `AListTVUITests.testSubtitleSelectionJourney` |
+| TVOS-PLAY-006 | `VLCPlayerControllerAdapter.selectAudioTrack(id:)` | `AListTVUITests.testAudioSelectionJourney`; embedded-audio device scenario |
+| TVOS-PLAY-007 | `VLCPlayerControllerAdapter.refreshDiagnostics(force:)`, `PlaybackDiagnosticsPanel` | diagnostic formatting test; `AListTVUITests.testDiagnosticsToggleJourney` |
 | TVOS-SEC-001 | `ServerURLValidator`, `PlayableURLValidator`, default `URLSession` trust handling | Release Info.plist inspection; self-signed and HTTP negative scenarios |
