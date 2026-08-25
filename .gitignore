@@ -41,3 +41,6 @@ xcuserdata/
 # Local tvOS verification backend
 /tvos-backend/
 tvos-backend.md
+
+# Local environment variables
+.env

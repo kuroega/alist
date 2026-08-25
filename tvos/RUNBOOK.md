@@ -33,22 +33,17 @@ go build -o "$RUN_ROOT/alist" .
 "$RUN_ROOT/alist" --data "$RUN_ROOT/data" --log-std admin
 ```
 
-首次启动会在日志中输出初始 `admin` 密码。将其保存在密码管理器；不要把密码写入截图、文档、提交信息或仓库文件。
+首次启动会在日志中输出随机生成的初始 `admin` 密码。
 
-若忘记密码，AList 3.25.0 以上无法从数据库 hash 还原原密码，只能重置。先以 `Ctrl-C` 停止正在使用同一数据目录的 AList 服务，再二选一执行：
+为方便调试，建议设置固定的 admin 密码。项目中提供了一个 `.env.example` 文件，请**不要直接修改或使用该 example 文件**。
+请将其复制为被 git 忽略的 `.env` 文件，并在其中填入你想使用的密码：
 
 ```sh
-# 随机生成新密码；命令会在当前终端显示一次。
-"$RUN_ROOT/alist" --data "$RUN_ROOT/data" admin random
-
-# 或手动设置。输入不会回显，但密码会短暂作为进程参数传给 AList。
-read -rs ALIST_ADMIN_PASSWORD
-printf '\n'
-"$RUN_ROOT/alist" --data "$RUN_ROOT/data" admin set "$ALIST_ADMIN_PASSWORD"
-unset ALIST_ADMIN_PASSWORD
+cp .env.example .env
+# 编辑 .env 文件，修改 ALIST_ADMIN_PASSWORD 的值
 ```
 
-保存新密码后，按第 1.3 节命令重新启动服务。先用 Mac 浏览器或 App 验证登录；不要把真实密码补进本手册或任何被 Git 跟踪的配置。
+后续每次启动服务时（第 1.3 节），启动脚本会自动加载 `.env` 并在启动前强制设置为你指定的固定密码。由于 `.env` 已被忽略，密码不会被提交到代码库。
 
 ### 1.2 可选：验证 HTTPS 时生成开发证书
 
@@ -108,9 +103,15 @@ xcrun simctl keychain booted add-root-cert "$(mkcert -CAROOT)/rootCA.pem"
 }
 ```
 
-将示例中的 `10.0.0.2` 替换为 Mac 当前私网 IP，并将 `/Users/you/alist-tvos-local` 替换为实际的 `$RUN_ROOT`。然后启动服务：
+将示例中的 `10.0.0.2` 替换为 Mac 当前私网 IP，并将 `/Users/you/alist-tvos-local` 替换为实际的 `$RUN_ROOT`。每次启动服务时，通过加载 `.env` 强制设置管理员密码，确保调试体验一致：
 
 ```sh
+ALIST_ADMIN_PASSWORD=$(grep -m 1 '^ALIST_ADMIN_PASSWORD=' .env | sed 's/^ALIST_ADMIN_PASSWORD=//')
+if [ -z "$ALIST_ADMIN_PASSWORD" ] || [ "$ALIST_ADMIN_PASSWORD" = "your_fixed_password_here" ]; then
+  echo "错误: 请先在 .env 中设置 ALIST_ADMIN_PASSWORD"
+  return 1 2>/dev/null || exit 1
+fi
+"$RUN_ROOT/alist" --data "$RUN_ROOT/data" admin set "$ALIST_ADMIN_PASSWORD"
 "$RUN_ROOT/alist" --data "$RUN_ROOT/data" --log-std server
 ```
 
