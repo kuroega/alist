@@ -30,6 +30,12 @@ final class PlayerCoordinator: ObservableObject {
     @Published private(set) var subtitleSelection: SubtitleSelection = .off
 
     let controller: any PlayerControlling
+    var nowPlayingTitle: String { currentObject?.name ?? "Now Playing" }
+    var nowPlayingPath: String? { currentObject?.virtualPath }
+    var isTerminalFailure: Bool {
+        if case .failed = state { return true }
+        return false
+    }
     private let api: any AListAPI
     private let progressStore: PlaybackProgressStore
     private let baseURL: URL
@@ -96,7 +102,13 @@ final class PlayerCoordinator: ObservableObject {
         }
     }
 
+    func retryPlayback() {
+        guard let object = currentObject else { return }
+        Task { await play(object: object) }
+    }
+
     func playerDidDisappear() {
+        guard isPresented || state != .idle else { return }
         sessionID = UUID()
         finishMonitoring(saveProgress: true)
         discoveryTask?.cancel()

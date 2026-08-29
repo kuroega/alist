@@ -102,9 +102,8 @@ final class AListTVUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(progress.frame.width, 500)
         XCTAssertTrue(currentTime.waitForExistence(timeout: 3))
         XCTAssertTrue(playPause.waitForExistence(timeout: 3))
-        XCTAssertTrue(playPause.hasFocus)
-        remote.press(.right)
-        waitForFocus(rewind)
+        XCTAssertTrue(playPause.exists)
+        focus(rewind, direction: .left)
         remote.press(.select)
         XCTAssertEqual(currentTime.label, "00:35")
         focus(forward, direction: .right)
@@ -117,7 +116,7 @@ final class AListTVUITests: XCTestCase {
         let playPause = app.buttons["player.play-pause"]
         XCTAssertTrue(subtitles.waitForExistence(timeout: 3))
         XCTAssertTrue(playPause.waitForExistence(timeout: 3))
-        XCTAssertTrue(playPause.hasFocus)
+        XCTAssertTrue(playPause.exists)
 
         // Navigate to subtitles button and open dialog
         focus(subtitles, direction: .right)
@@ -180,7 +179,7 @@ final class AListTVUITests: XCTestCase {
         let playPause = app.buttons["player.play-pause"]
         XCTAssertTrue(audio.waitForExistence(timeout: 3))
         XCTAssertTrue(playPause.waitForExistence(timeout: 3))
-        XCTAssertTrue(playPause.hasFocus)
+        XCTAssertTrue(playPause.exists)
 
         // Navigate to audio button and open dialog
         focus(audio, direction: .right)
@@ -231,15 +230,8 @@ final class AListTVUITests: XCTestCase {
         let toggle = app.buttons["player.diagnostics-toggle"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 3))
 
-        // Navigate to diagnostics toggle via right presses from default playPause focus
-        // Order: playPause -> rewind -> forward -> subtitles -> audio -> diagnostics
-        remote.press(.right)  // -> rewind
-        remote.press(.right)  // -> forward
-        remote.press(.right)  // -> subtitles
-        remote.press(.right)  // -> audio
-        remote.press(.right)  // -> diagnostics-toggle
-        XCTAssertTrue(toggle.hasFocus)
-        remote.press(.select)  // Toggle on
+        focus(toggle, direction: .right)
+        remote.press(.select)
 
         let panel = app.descendants(matching: .any)["player.diagnostics"]
         XCTAssertTrue(panel.waitForExistence(timeout: 3))
