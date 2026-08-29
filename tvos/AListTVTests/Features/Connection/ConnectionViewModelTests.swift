@@ -61,6 +61,26 @@ final class ConnectionViewModelTests: XCTestCase {
         XCTAssertNil(preferences.loadConnection())
     }
 
+    func testSessionClearRetainsRememberedConnection() async throws {
+        let api = ConnectionFakeAPI(loginResults: [.success(LoginData(token: "token", deviceKey: nil))])
+        let store = TestCredentialStore()
+        let viewModel = ConnectionViewModel(preferences: preferences, credentialStore: store) { _, _ in api }
+
+        await viewModel.submit(serverURL: "https://alist.example/", username: "alice", password: "secret")
+        try viewModel.clearSession()
+
+        XCTAssertEqual(viewModel.state, .idle)
+        XCTAssertNil(store.token)
+        XCTAssertEqual(
+            viewModel.rememberedConnection,
+            StoredConnection(
+                baseURL: URL(string: "https://alist.example")!,
+                username: "alice",
+                clientID: preferences.stableClientID()
+            )
+        )
+    }
+
     func testRecoveryUnauthorizedDeletesToken() async {
         let api = ConnectionFakeAPI(currentUserError: .unauthorized)
         let store = TestCredentialStore(token: "expired")

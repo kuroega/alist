@@ -22,9 +22,12 @@ struct ConnectionView: View {
         self.submit = submit
         self.submitOTP = submitOTP
         self.retryRecovery = retryRecovery
+        let savedConnection = viewModel.rememberedConnection
+        _serverURL = State(initialValue: savedConnection?.baseURL.absoluteString ?? "")
+        _username = State(initialValue: savedConnection?.username ?? "")
 #if DEBUG
         let arguments = ProcessInfo.processInfo.arguments
-        if arguments.contains("ui-testing") {
+        if arguments.contains("ui-testing"), savedConnection == nil {
             func value(for key: String) -> String {
                 let prefix = "\(key)="
                 guard let argument = arguments.first(where: { $0.hasPrefix(prefix) }) else { return "" }

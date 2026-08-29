@@ -70,7 +70,11 @@ final class AListTVUITests: XCTestCase {
         let logout = app.buttons["browser.logout"]
         XCTAssertTrue(logout.waitForExistence(timeout: 3))
         focusAndSelect(logout, direction: .up)
-        XCTAssertTrue(app.textFields["connection.server"].waitForExistence(timeout: 3))
+        let server = app.textFields["connection.server"]
+        XCTAssertTrue(server.waitForExistence(timeout: 3))
+        XCTAssertEqual(server.value as? String, "https://alist.example")
+        XCTAssertEqual(app.textFields["connection.username"].value as? String, "alice")
+        XCTAssertEqual(app.secureTextFields["connection.password"].value as? String, "Password")
         XCTAssertFalse(app.buttons["browser.item./Shows"].exists)
     }
 
@@ -274,7 +278,8 @@ final class AListTVUITests: XCTestCase {
         let usernameField = app.textFields["connection.username"]
         XCTAssertTrue(usernameField.exists)
         XCTAssertEqual(usernameField.value as? String, username)
-        XCTAssertTrue(app.secureTextFields["connection.password"].exists)
+        let password = app.secureTextFields["connection.password"]
+        XCTAssertTrue(password.exists)
     }
 
 
