@@ -319,26 +319,33 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
     }
 
     private var timeline: some View {
-        Button(action: commitScrub) {
-            VStack(spacing: 10) {
-                HStack {
-                    Text(timeText(displayTime)).monospacedDigit().accessibilityIdentifier("player.current-time")
-                    Spacer()
-                    if scrubTarget != nil { Text("Seek to \(timeText(displayTime))").foregroundStyle(.tint) }
-                    else { Text("−\(timeText(max(0, duration - currentTime))) remaining") }
-                }
-                PlaybackTimeline(currentTime: displayTime, bufferedTime: bufferedTime, duration: duration, isBuffering: isBuffering, isScrubbing: scrubTarget != nil)
-                    .frame(height: 18)
-                    .frame(maxWidth: .infinity)
-                    .accessibilityIdentifier("player.progress")
+        VStack(spacing: 10) {
+            HStack {
+                Text(timeText(displayTime)).monospacedDigit().accessibilityIdentifier("player.current-time")
+                Spacer()
+                if scrubTarget != nil { Text("Seek to \(timeText(displayTime))").foregroundStyle(.tint) }
+                else { Text("−\(timeText(max(0, duration - currentTime))) remaining") }
             }
+            PlaybackTimeline(currentTime: displayTime, bufferedTime: bufferedTime, duration: duration, isBuffering: isBuffering, isScrubbing: scrubTarget != nil)
+                .frame(height: 18)
+                .frame(maxWidth: .infinity)
+                .accessibilityIdentifier("player.progress")
         }
-        .buttonStyle(.plain)
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .background(focus == .timeline ? .white.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .disabled(!isSeekable)
+        .background(focus == .timeline ? .black.opacity(0.72) : .clear, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            if focus == .timeline {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(.white.opacity(0.42), lineWidth: 1)
+            }
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .focusable(isSeekable)
         .focused($focus, equals: .timeline)
+        .focusEffectDisabled()
+        .onTapGesture { commitScrub() }
+        .accessibilityAddTraits(.isButton)
         .accessibilityIdentifier("player.timeline")
         .accessibilityLabel("Playback timeline")
         .accessibilityValue("\(timeText(displayTime)) of \(timeText(duration))")
