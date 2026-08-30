@@ -1,6 +1,5 @@
 import Combine
 import Foundation
-import UIKit
 
 enum BrowserSortCriterion: String, CaseIterable, Hashable {
     case name
@@ -31,13 +30,6 @@ final class BrowserViewModel: ObservableObject {
         case forbidden
         case loadMoreFailed(message: String)
     }
-    private enum ArtworkState {
-        case loading
-        case loaded
-        case failed
-    }
-
-
     @Published private(set) var state: State = .idle
     @Published private(set) var path = "/"
     @Published private(set) var items: [AListObject] = []
@@ -45,7 +37,6 @@ final class BrowserViewModel: ObservableObject {
     @Published private(set) var sortCriterion: BrowserSortCriterion = .name
     @Published private(set) var isSortAscending = true
     @Published private(set) var hasMore = false
-    @Published private(set) var artworkRevision = 0
 
 
     private struct PageKey: Hashable {
@@ -69,11 +60,6 @@ final class BrowserViewModel: ObservableObject {
     private var pendingRestoredFocus: String?
     private var failedNextPage: Int?
 
-    private let artworkCache = NSCache<NSString, UIImage>()
-    private var artworkTasks: [String: Task<Void, Never>] = [:]
-    private var artworkStates: [String: ArtworkState] = [:]
-
-
     init(
         api: any AListAPI,
         perPage: Int = 200,
@@ -84,12 +70,10 @@ final class BrowserViewModel: ObservableObject {
         self.perPage = perPage
         self.onPlay = onPlay
         self.onUnauthorized = onUnauthorized
-        artworkCache.totalCostLimit = 48 * 1024 * 1024
     }
 
     deinit {
         loadTask?.cancel()
-        artworkTasks.values.forEach { $0.cancel() }
     }
 
 
@@ -148,52 +132,6 @@ final class BrowserViewModel: ObservableObject {
         isSortAscending = ascending
         updateItems()
     }
-
-    func artwork(for object: AListObject) -> UIImage? {
-        artworkCache.object(forKey: artworkKey(for: object))
-    }
-
-    func loadArtwork(for object: AListObject) {
-        guard object.fileType == .audio || object.fileType == .video,
-              let path = object.virtualPath else { return }
-        let key = artworkKey(for: object) as String
-        guard artworkStates[key] == nil else { return }
-
-        artworkStates[key] = .loading
-        artworkTasks[key] = Task { [weak self, api, onUnauthorized] in
-            defer { self?.artworkTasks[key] = nil }
-            do {
-                let detail = try await api.get(path: path)
-                let url = try PlayableURLValidator.validate(detail.rawURL)
-                await ArtworkLoadLimiter.shared.acquire()
-                let image = await MediaArtworkLoader.load(from: url, type: object.fileType)
-                await ArtworkLoadLimiter.shared.release()
-
-                guard let image, !Task.isCancelled else {
-                    self?.artworkStates[key] = .failed
-                    return
-                }
-                self?.artworkCache.setObject(image, forKey: key as NSString, cost: Self.artworkCost(image))
-                self?.artworkRevision &+= 1
-                self?.artworkStates[key] = .loaded
-            } catch AListAPIError.unauthorized {
-                self?.artworkStates[key] = .failed
-                await onUnauthorized()
-            } catch {
-                self?.artworkStates[key] = .failed
-            }
-        }
-    }
-
-    private func artworkKey(for object: AListObject) -> NSString {
-        "\(object.virtualPath ?? object.name)#\(object.modified ?? "")" as NSString
-    }
-
-    private static func artworkCost(_ image: UIImage) -> Int {
-        guard let cgImage = image.cgImage else { return 0 }
-        return cgImage.width * cgImage.height * 4
-    }
-
 
     private func beginLoading(path requestedPath: String, restoredFocus: String?) {
         loadTask?.cancel()
