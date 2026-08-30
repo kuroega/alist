@@ -86,6 +86,14 @@ final class AListTVUITests: XCTestCase {
         let done = app.buttons["player.done"]
         XCTAssertTrue(done.waitForExistence(timeout: 3))
         remote.press(.menu)
+        XCTAssertFalse(done.waitForExistence(timeout: 1))
+
+        remote.press(.up)
+        XCTAssertTrue(done.waitForExistence(timeout: 3))
+        remote.press(.menu)
+        XCTAssertFalse(done.waitForExistence(timeout: 1))
+
+        remote.press(.menu)
         XCTAssertTrue(video.waitForExistence(timeout: 3))
         expectation(for: NSPredicate(format: "value == 'focused'"), evaluatedWith: video)
         waitForExpectations(timeout: 3)

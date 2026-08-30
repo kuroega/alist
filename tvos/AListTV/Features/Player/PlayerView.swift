@@ -4,25 +4,24 @@ import UIKit
 struct PlayerView: View {
     @ObservedObject var coordinator: PlayerCoordinator
     @Environment(\.dismiss) private var dismiss
+    @State private var exitRequestID = 0
 
     var body: some View {
         Group {
 #if DEBUG
             if let adapter = coordinator.controller as? VLCPlayerControllerAdapter {
-                VLCPlayerContainerView(adapter: adapter, coordinator: coordinator, dismiss: dismiss)
+                VLCPlayerContainerView(adapter: adapter, coordinator: coordinator, dismiss: dismiss, exitRequestID: exitRequestID)
             } else if let fixture = coordinator.controller as? FixturePlayerController {
-                FixturePlayerContainerView(fixture: fixture, coordinator: coordinator, dismiss: dismiss)
+                FixturePlayerContainerView(fixture: fixture, coordinator: coordinator, dismiss: dismiss, exitRequestID: exitRequestID)
             }
 #else
             if let adapter = coordinator.controller as? VLCPlayerControllerAdapter {
-                VLCPlayerContainerView(adapter: adapter, coordinator: coordinator, dismiss: dismiss)
+                VLCPlayerContainerView(adapter: adapter, coordinator: coordinator, dismiss: dismiss, exitRequestID: exitRequestID)
             }
 #endif
         }
-        .onExitCommand {
-            coordinator.playerDidDisappear()
-            dismiss()
-        }
+        .interactiveDismissDisabled()
+        .onExitCommand { exitRequestID += 1 }
         .onDisappear { coordinator.playerDidDisappear() }
     }
 }
@@ -37,10 +36,12 @@ struct VLCPlayerContainerView: View {
     @ObservedObject var adapter: VLCPlayerControllerAdapter
     @ObservedObject var coordinator: PlayerCoordinator
     let dismiss: DismissAction
+    let exitRequestID: Int
 
     var body: some View {
         ImmersivePlaybackStage(
             coordinator: coordinator,
+            exitRequestID: exitRequestID,
             currentTime: adapter.currentTime,
             duration: adapter.duration,
             isPlaying: adapter.isPlaying,
@@ -68,10 +69,12 @@ struct FixturePlayerContainerView: View {
     @ObservedObject var fixture: FixturePlayerController
     @ObservedObject var coordinator: PlayerCoordinator
     let dismiss: DismissAction
+    let exitRequestID: Int
 
     var body: some View {
         ImmersivePlaybackStage(
             coordinator: coordinator,
+            exitRequestID: exitRequestID,
             currentTime: fixture.currentTime,
             duration: fixture.duration,
             isPlaying: fixture.isPlaying,
@@ -101,6 +104,7 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
     private enum PresentedPanel: Equatable { case subtitles, audio }
 
     @ObservedObject var coordinator: PlayerCoordinator
+    let exitRequestID: Int
     let currentTime: TimeInterval
     let duration: TimeInterval
     let isPlaying: Bool
@@ -132,16 +136,26 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
     var body: some View {
         ZStack {
             Color.black
+            MenuKeyCommandCapture(
+                onMenu: handleExitCommand,
+                onDirectional: { revealChrome(focus: .playPause) },
+                interceptsDirectional: !chromeVisible && presentedPanel == nil && diagnostics == nil
+            )
+                .frame(width: 1, height: 1)
+                .allowsHitTesting(false)
             videoContent()
+            Color.clear
+                .contentShape(Rectangle())
                 .focusable(focus == .surface)
                 .focused($focus, equals: .surface)
+                .onMoveCommand(perform: handleMove)
 
-            if chromeVisible || !isPlaying || presentedPanel != nil || coordinator.isTerminalFailure {
+            if chromeVisible || presentedPanel != nil || coordinator.isTerminalFailure {
                 chromeBackdrop
                     .transition(.opacity)
             }
 
-            if chromeVisible || !isPlaying {
+            if chromeVisible {
                 chrome
                     .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
@@ -178,7 +192,11 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
             if playing { scheduleChromeHideIfNeeded() } else { revealChrome() }
         }
         .onChange(of: isBuffering) { _, buffering in if buffering { revealChrome() } else { scheduleChromeHideIfNeeded() } }
-        .onChange(of: focus) { _, target in if target != nil { revealChrome() } }
+        .onChange(of: focus) { _, target in
+            guard target != nil, target != .surface else { return }
+            revealChrome()
+        }
+        .onChange(of: exitRequestID) { _, _ in handleExitCommand() }
         .onPlayPauseCommand { togglePlayback() }
         .onTapGesture { togglePlayback() }
         .onMoveCommand(perform: handleMove)
@@ -443,6 +461,25 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
     private func timeText(_ seconds: TimeInterval) -> String { let value = max(0, Int(seconds.rounded(.down))); return value >= 3_600 ? String(format: "%d:%02d:%02d", value / 3_600, (value % 3_600) / 60, value % 60) : String(format: "%02d:%02d", value / 60, value % 60) }
     private func trackLabel(_ track: PlaybackTrackOption) -> String { [track.title, track.languageCode, track.codec].compactMap { $0 }.joined(separator: " · ") }
 
+    private func handleExitCommand() {
+        guard !coordinator.isTerminalFailure else {
+            close()
+            return
+        }
+
+        let hasTransientUI = chromeVisible || presentedPanel != nil || diagnostics != nil
+        guard hasTransientUI else {
+            close()
+            return
+        }
+
+        hideChromeTask?.cancel()
+        presentedPanel = nil
+        if diagnostics != nil { setDiagnosticsEnabled(false) }
+        focus = .surface
+        chromeVisible = false
+    }
+
     private func handleMove(_ direction: MoveCommandDirection) {
         revealChrome()
         guard presentedPanel == nil else { return }
@@ -544,4 +581,78 @@ private struct PlaybackDiagnosticsPanel: View {
     private func bitrate(_ value: Double) -> String { PlaybackPresentation.diagnosticBitrate(value) }
     private func frameRate(_ value: Double?) -> String { value.map { String(format: "%.2f fps", $0) } ?? "—" }
     private func metadata(_ title: String?, _ language: String?, _ codec: String?) -> String { PlaybackPresentation.diagnosticMetadata(title, language, codec) }
+}
+
+private struct MenuKeyCommandCapture: UIViewControllerRepresentable {
+    let onMenu: () -> Void
+    let onDirectional: () -> Void
+    let interceptsDirectional: Bool
+
+    func makeUIViewController(context: Context) -> MenuKeyCommandController {
+        MenuKeyCommandController(onMenu: onMenu, onDirectional: onDirectional, interceptsDirectional: interceptsDirectional)
+    }
+
+    func updateUIViewController(_ controller: MenuKeyCommandController, context: Context) {
+        controller.onMenu = onMenu
+        controller.onDirectional = onDirectional
+        controller.interceptsDirectional = interceptsDirectional
+        controller.claimFirstResponder()
+    }
+}
+
+private final class MenuKeyCommandController: UIViewController {
+    var onMenu: () -> Void
+    var onDirectional: () -> Void
+    var interceptsDirectional: Bool
+
+    init(onMenu: @escaping () -> Void, onDirectional: @escaping () -> Void, interceptsDirectional: Bool) {
+        self.onMenu = onMenu
+        self.onDirectional = onDirectional
+        self.interceptsDirectional = interceptsDirectional
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var canBecomeFirstResponder: Bool { true }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        claimFirstResponder()
+    }
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if presses.contains(where: { $0.type == .menu }) {
+            onMenu()
+            return
+        }
+        if interceptsDirectional, presses.contains(where: Self.isDirectional) {
+            onDirectional()
+            return
+        }
+        super.pressesBegan(presses, with: event)
+    }
+
+    override var keyCommands: [UIKeyCommand]? {
+        [UIKeyCommand(input: UIKeyCommand.inputEscape, modifierFlags: [], action: #selector(handleEscape))]
+    }
+
+    func claimFirstResponder() {
+        guard view.window != nil else { return }
+        becomeFirstResponder()
+    }
+
+    @objc private func handleEscape() {
+        onMenu()
+    }
+
+    private static func isDirectional(_ press: UIPress) -> Bool {
+        switch press.type {
+        case .upArrow, .downArrow, .leftArrow, .rightArrow:
+            true
+        default:
+            false
+        }
+    }
 }
