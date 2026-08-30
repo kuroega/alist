@@ -162,6 +162,7 @@ final class AListTVUITests: XCTestCase {
         let sampleBtn = dialogButton(containing: "Sample.zh.srt")
         focus(sampleBtn, direction: .down)
         remote.press(.select)
+        sleep(1)
 
         // Reopen dialog and verify Sample.zh.srt is selected
         waitForFocus(subtitles)
@@ -173,12 +174,38 @@ final class AListTVUITests: XCTestCase {
         let unrelatedBtn = dialogButton(containing: "Unrelated.ass")
         focus(unrelatedBtn, direction: .down)
         remote.press(.select)
+        sleep(1)
 
         // Reopen dialog and verify Unrelated.ass is selected
         waitForFocus(subtitles)
         remote.press(.select)
         XCTAssertTrue(dialogButton(containing: "Unrelated.ass").waitForExistence(timeout: 3))
         assertDialogSelection("Unrelated.ass", file: #file, line: #line)
+    }
+
+    func testSubtitleAppearanceJourney() {
+        openFixturePlayer()
+        let subtitles = app.buttons["player.subtitles"]
+        focusAndSelect(subtitles, direction: .right)
+
+        let appearance = app.buttons["player.subtitle-appearance"]
+        XCTAssertTrue(appearance.waitForExistence(timeout: 3))
+        focusAndSelect(appearance, direction: .up)
+
+        let panel = app.descendants(matching: .any)["player.subtitle-appearance-panel"]
+        XCTAssertTrue(panel.waitForExistence(timeout: 3))
+
+        let serif = app.buttons["player.subtitle-font.serif"]
+        focusAndSelect(serif, direction: .down)
+        XCTAssertEqual(serif.value as? String, "selected")
+
+        let yellow = app.buttons["player.subtitle-color.yellow"]
+        focusAndSelect(yellow, direction: .down)
+        XCTAssertEqual(yellow.value as? String, "selected")
+
+        let medium = app.buttons["player.subtitle-opacity.50"]
+        focusAndSelect(medium, direction: .down)
+        XCTAssertEqual(medium.value as? String, "selected")
     }
 
     func testAudioSelectionJourney() {

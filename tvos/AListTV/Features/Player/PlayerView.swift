@@ -51,6 +51,9 @@ struct VLCPlayerContainerView: View {
             audioTracks: adapter.audioTracks,
             embeddedSubtitleTracks: adapter.embeddedSubtitleTracks,
             selectedExternalSubtitleID: adapter.selectedExternalSubtitleID,
+            subtitleAppearance: coordinator.subtitleAppearance,
+            subtitleOverlay: coordinator.subtitleOverlay,
+            updateSubtitleAppearance: coordinator.updateSubtitleAppearance,
             diagnostics: adapter.diagnostics,
             play: adapter.play,
             pause: adapter.pause,
@@ -84,6 +87,9 @@ struct FixturePlayerContainerView: View {
             audioTracks: fixture.audioTracks,
             embeddedSubtitleTracks: fixture.embeddedSubtitleTracks,
             selectedExternalSubtitleID: fixture.selectedExternalSubtitleID,
+            subtitleAppearance: coordinator.subtitleAppearance,
+            subtitleOverlay: coordinator.subtitleOverlay,
+            updateSubtitleAppearance: coordinator.updateSubtitleAppearance,
             diagnostics: fixture.diagnostics,
             play: fixture.play,
             pause: fixture.pause,
@@ -100,8 +106,8 @@ struct FixturePlayerContainerView: View {
 #endif
 
 private struct ImmersivePlaybackStage<VideoContent: View>: View {
-    private enum FocusTarget: Hashable { case surface, close, playPause, rewind, timeline, forward, subtitles, audio, diagnostics, panel }
-    private enum PresentedPanel: Equatable { case subtitles, audio }
+    private enum FocusTarget: Hashable { case surface, close, playPause, rewind, timeline, forward, subtitles, audio, diagnostics, panel, appearance, appearanceReset, appearanceBack }
+    private enum PresentedPanel: Equatable { case subtitles, audio, subtitleAppearance }
 
     @ObservedObject var coordinator: PlayerCoordinator
     let exitRequestID: Int
@@ -114,6 +120,9 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
     let audioTracks: [PlaybackTrackOption]
     let embeddedSubtitleTracks: [PlaybackTrackOption]
     let selectedExternalSubtitleID: String?
+    let subtitleAppearance: SubtitleAppearance
+    @ObservedObject var subtitleOverlay: SubtitleOverlayModel
+    let updateSubtitleAppearance: (SubtitleAppearance) -> Void
     let diagnostics: PlaybackDiagnosticsSnapshot?
     let play: () -> Void
     let pause: () -> Void
@@ -144,6 +153,7 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
                 .frame(width: 1, height: 1)
                 .allowsHitTesting(false)
             videoContent()
+            SubtitleOverlayView(text: subtitleOverlay.activeText, appearance: subtitleAppearance)
             Color.clear
                 .contentShape(Rectangle())
                 .focusable(focus == .surface)
@@ -161,8 +171,13 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
             }
 
             if let panel = presentedPanel {
-                trackPanel(panel)
-                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                if panel == .subtitleAppearance {
+                    subtitleAppearancePanel
+                        .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                } else {
+                    trackPanel(panel)
+                        .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                }
             }
 
             if let diagnostics {
@@ -188,6 +203,7 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
             }
         }
         .onDisappear { hideChromeTask?.cancel() }
+        .onChange(of: currentTime) { _, time in subtitleOverlay.update(time: time) }
         .onChange(of: isPlaying) { _, playing in
             if playing { scheduleChromeHideIfNeeded() } else { revealChrome() }
         }
@@ -367,6 +383,24 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
             ScrollView {
                 VStack(spacing: 10) {
                     if isSubtitles {
+                        Button {
+                            presentedPanel = .subtitleAppearance
+                            focus = .appearanceReset
+                        } label: {
+                            HStack {
+                                Label("Subtitle Appearance", systemImage: "textformat")
+                                Spacer()
+                                Text("\(subtitleAppearance.font.title) · \(subtitleAppearance.color.title) · \(subtitleAppearance.opacity.title)")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 14)
+                        }
+                        .buttonStyle(.plain)
+                        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .accessibilityIdentifier("player.subtitle-appearance")
+                        .accessibilityValue("\(subtitleAppearance.font.title), \(subtitleAppearance.color.title), \(subtitleAppearance.opacity.title)")
+
                         trackRow(title: "Off", detail: nil, selected: isOffSelected) {
                             Task { await coordinator.selectSubtitle(.off) }
                             dismissPanel()
@@ -410,6 +444,113 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
         .accessibilityIdentifier(isSubtitles ? "player.subtitle-panel" : "player.audio-panel")
     }
 
+    private var subtitleAppearancePanel: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack {
+                Text("Subtitle Appearance")
+                    .font(.title2.weight(.bold))
+                Spacer()
+                Button("Reset") { updateSubtitleAppearance(.default) }
+                    .focused($focus, equals: .appearanceReset)
+                    .focusEffectDisabled()
+                    .accessibilityIdentifier("player.subtitle-appearance-reset")
+                Button("Back", action: dismissAppearance)
+                    .focused($focus, equals: .appearanceBack)
+                    .focusEffectDisabled()
+                    .accessibilityIdentifier("player.subtitle-appearance-close")
+            }
+            .focusSection()
+
+            subtitlePreview
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    appearanceSection("Font") {
+                        ForEach(SubtitleAppearance.FontChoice.allCases) { choice in
+                            appearanceChoice(
+                                title: choice.title,
+                                selected: subtitleAppearance.font == choice,
+                                identifier: "player.subtitle-font.\(choice.rawValue)"
+                            ) {
+                                updateSubtitleAppearance(SubtitleAppearance(font: choice, color: subtitleAppearance.color, opacity: subtitleAppearance.opacity))
+                            }
+                        }
+                    }
+                    appearanceSection("Text Color") {
+                        ForEach(SubtitleAppearance.ColorChoice.allCases) { choice in
+                            appearanceChoice(
+                                title: choice.title,
+                                selected: subtitleAppearance.color == choice,
+                                identifier: "player.subtitle-color.\(choice.rawValue)",
+                                swatch: choice.previewColor
+                            ) {
+                                updateSubtitleAppearance(SubtitleAppearance(font: subtitleAppearance.font, color: choice, opacity: subtitleAppearance.opacity))
+                            }
+                        }
+                    }
+                    appearanceSection("Opacity") {
+                        ForEach(SubtitleAppearance.OpacityChoice.allCases) { choice in
+                            appearanceChoice(
+                                title: choice.title,
+                                selected: subtitleAppearance.opacity == choice,
+                                identifier: "player.subtitle-opacity.\(choice.rawValue)"
+                            ) {
+                                updateSubtitleAppearance(SubtitleAppearance(font: subtitleAppearance.font, color: subtitleAppearance.color, opacity: choice))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .padding(36)
+        .frame(width: 880, height: 760, alignment: .topLeading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 32, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 32, style: .continuous).stroke(.white.opacity(0.16), lineWidth: 1))
+        .accessibilityIdentifier("player.subtitle-appearance-panel")
+    }
+
+    private var subtitlePreview: some View {
+        ZStack(alignment: .bottom) {
+            LinearGradient(colors: [.blue.opacity(0.68), .black.opacity(0.9)], startPoint: .top, endPoint: .bottom)
+            Text("A clear subtitle preview")
+                .font(subtitleAppearance.font.previewFont.weight(.semibold))
+                .foregroundStyle(subtitleAppearance.color.previewColor.opacity(subtitleAppearance.opacity.fraction))
+                .shadow(color: .black.opacity(0.9), radius: 3, y: 2)
+                .padding(.bottom, 24)
+        }
+        .frame(height: 130)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .accessibilityLabel("Subtitle preview")
+    }
+
+    private func appearanceSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title).font(.headline)
+            content()
+        }
+    }
+
+    private func appearanceChoice(title: String, selected: Bool, identifier: String, swatch: Color? = nil, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 14) {
+                if let swatch {
+                    Circle().fill(swatch).frame(width: 22, height: 22).overlay(Circle().stroke(.white.opacity(0.5), lineWidth: 1))
+                }
+                Text(title)
+                Spacer()
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 13)
+        }
+        .buttonStyle(.plain)
+        .focusEffectDisabled()
+        .background(selected ? Color.accentColor.opacity(0.16) : Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .accessibilityIdentifier(identifier)
+        .accessibilityValue(selected ? "selected" : "not selected")
+    }
+
     private func trackRow(title: String, detail: String?, selected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 16) {
@@ -426,6 +567,7 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .focusEffectDisabled()
         .background(selected ? Color.accentColor.opacity(0.16) : Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
@@ -459,6 +601,11 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
     private func performSeek(_ seconds: TimeInterval) { seek(PlaybackPresentation.clampedSeekTarget(seconds, duration: duration)); scrubTarget = nil; revealChrome() }
     private func commitScrub() { guard let scrubTarget else { return }; performSeek(scrubTarget) }
     private func openPanel(_ panel: PresentedPanel) { presentedPanel = panel; hideChromeTask?.cancel(); chromeVisible = true; focus = .panel }
+    private func dismissAppearance() {
+        presentedPanel = .subtitles
+        focus = .panel
+    }
+
     private func dismissPanel() {
         let target: FocusTarget = presentedPanel == .audio ? .audio : .subtitles
         presentedPanel = nil
@@ -525,6 +672,31 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
             guard !Task.isCancelled, isPlaying, !isBuffering, presentedPanel == nil, !coordinator.isTerminalFailure, focus == .surface else { return }
             chromeVisible = false
         }
+    }
+}
+
+private struct SubtitleOverlayView: View {
+    let text: String?
+    let appearance: SubtitleAppearance
+
+    var body: some View {
+        Group {
+            if let text {
+                Text(text)
+                    .font(appearance.font.previewFont.weight(.semibold))
+                    .foregroundStyle(appearance.color.previewColor.opacity(appearance.opacity.fraction))
+                    .multilineTextAlignment(.center)
+                    .shadow(color: .black.opacity(0.95), radius: 3, x: 0, y: 2)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 10)
+                    .background(.black.opacity(0.3), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .padding(.horizontal, 80)
+                    .padding(.bottom, 96)
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 

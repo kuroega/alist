@@ -17,13 +17,17 @@ final class AppContainer: ObservableObject {
     let connectionViewModel: ConnectionViewModel
 
     private let controllerFactory: @MainActor () -> any PlayerControlling
+    private let subtitleDataLoader: @Sendable (URL) async throws -> Data
+    private let subtitleAppearanceStore: SubtitleAppearanceStore
     private var didAttemptRestore = false
 
     init(arguments: [String] = ProcessInfo.processInfo.arguments) {
         let credentialStore: any CredentialStore
         let preferences: ConnectionPreferences
+        let subtitleAppearanceStore: SubtitleAppearanceStore
         let clientFactory: AListClientFactory
         let controllerFactory: @MainActor () -> any PlayerControlling
+        let subtitleDataLoader: @Sendable (URL) async throws -> Data
 
 #if DEBUG
         if arguments.contains("ui-testing") {
@@ -33,12 +37,15 @@ final class AppContainer: ObservableObject {
             let fixtureAPI = FixtureAListAPI()
             credentialStore = memoryStore
             preferences = ConnectionPreferences(defaults: defaults)
+            subtitleAppearanceStore = SubtitleAppearanceStore(defaults: defaults)
             clientFactory = { _, _ in fixtureAPI }
             controllerFactory = { FixturePlayerController() }
+            subtitleDataLoader = FixtureSubtitleDataLoader.load
         } else {
             let sessionStore = SessionCredentialStore(backing: KeychainCredentialStore())
             credentialStore = sessionStore
             preferences = ConnectionPreferences()
+            subtitleAppearanceStore = SubtitleAppearanceStore()
             clientFactory = { baseURL, clientID in
                 AListClient(
                     baseURL: baseURL,
@@ -47,6 +54,7 @@ final class AppContainer: ObservableObject {
                 )
             }
             controllerFactory = { VLCPlayerControllerAdapter() }
+            subtitleDataLoader = PlayerCoordinator.loadSubtitleData
         }
 #else
         let sessionStore = SessionCredentialStore(backing: KeychainCredentialStore())
@@ -60,9 +68,12 @@ final class AppContainer: ObservableObject {
             )
         }
         controllerFactory = { VLCPlayerControllerAdapter() }
+        subtitleDataLoader = PlayerCoordinator.loadSubtitleData
 #endif
 
         self.controllerFactory = controllerFactory
+        self.subtitleDataLoader = subtitleDataLoader
+        self.subtitleAppearanceStore = subtitleAppearanceStore
         connectionViewModel = ConnectionViewModel(
             preferences: preferences,
             credentialStore: credentialStore,
@@ -116,9 +127,11 @@ final class AppContainer: ObservableObject {
             api: api,
             controller: controllerFactory(),
             progressStore: PlaybackProgressStore(),
+            subtitleAppearanceStore: subtitleAppearanceStore,
             baseURL: connection.baseURL,
             username: connection.username,
-            onUnauthorized: { [weak self] in self?.handleUnauthorized() }
+            onUnauthorized: { [weak self] in self?.handleUnauthorized() },
+            subtitleDataLoader: subtitleDataLoader
         )
         playerCoordinator = player
         browserViewModel = BrowserViewModel(

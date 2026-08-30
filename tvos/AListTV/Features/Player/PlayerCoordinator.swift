@@ -28,6 +28,8 @@ final class PlayerCoordinator: ObservableObject {
     @Published private(set) var externalSubtitleDiscoveryState: ExternalSubtitleDiscoveryState = .idle
     @Published var subtitleSelectionError: String?
     @Published private(set) var subtitleSelection: SubtitleSelection = .off
+    @Published private(set) var subtitleAppearance: SubtitleAppearance
+    let subtitleOverlay = SubtitleOverlayModel()
 
     let controller: any PlayerControlling
     var nowPlayingTitle: String { currentObject?.name ?? "Now Playing" }
@@ -38,24 +40,45 @@ final class PlayerCoordinator: ObservableObject {
     }
     private let api: any AListAPI
     private let progressStore: PlaybackProgressStore
+    private let subtitleAppearanceStore: SubtitleAppearanceStore
     private let baseURL: URL
     private let username: String
     private let onUnauthorized: @MainActor () async -> Void
+    private let subtitleDataLoader: @Sendable (URL) async throws -> Data
     private var currentObject: AListObject?
     private var sessionID = UUID()
     private var refreshCount = 0
+    private var subtitleAppearanceReloadID = UUID()
     private var eventTask: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
     private var discoveryTask: Task<Void, Never>?
     private var subtitleSelectionTask: Task<Void, Never>?
 
-    init(api: any AListAPI, controller: any PlayerControlling, progressStore: PlaybackProgressStore, baseURL: URL, username: String, onUnauthorized: @escaping @MainActor () async -> Void = {}) {
+    init(
+        api: any AListAPI,
+        controller: any PlayerControlling,
+        progressStore: PlaybackProgressStore,
+        subtitleAppearanceStore: SubtitleAppearanceStore = SubtitleAppearanceStore(),
+        baseURL: URL,
+        username: String,
+        onUnauthorized: @escaping @MainActor () async -> Void = {},
+        subtitleDataLoader: @escaping @Sendable (URL) async throws -> Data = PlayerCoordinator.loadSubtitleData
+    ) {
         self.api = api
         self.controller = controller
         self.progressStore = progressStore
+        self.subtitleAppearanceStore = subtitleAppearanceStore
+        subtitleAppearance = subtitleAppearanceStore.load()
         self.baseURL = baseURL
         self.username = username
         self.onUnauthorized = onUnauthorized
+        self.subtitleDataLoader = subtitleDataLoader
+        controller.setSubtitleAppearance(subtitleAppearance)
+    }
+
+    static func loadSubtitleData(from url: URL) async throws -> Data {
+        let (data, _) = try await URLSession.shared.data(from: url)
+        return data
     }
 
     deinit {
@@ -137,9 +160,11 @@ final class PlayerCoordinator: ObservableObject {
         let activeSession = sessionID
         switch selection {
         case .off:
+            subtitleOverlay.clear()
             controller.selectEmbeddedSubtitle(id: nil)
             subtitleSelection = .off
         case let .embedded(trackID):
+            subtitleOverlay.clear()
             controller.selectEmbeddedSubtitle(id: trackID)
             subtitleSelection = controller.embeddedSubtitleTracks.first(where: { $0.id == trackID && $0.isSelected }) == nil ? subtitleSelection : selection
         case let .external(fileID):
@@ -154,11 +179,21 @@ final class PlayerCoordinator: ObservableObject {
                     let detail = try await self.api.get(path: option.virtualPath)
                     guard !Task.isCancelled, self.sessionID == activeSession else { return }
                     let url = try PlayableURLValidator.validate(detail.rawURL)
-                    guard self.controller.addExternalSubtitle(url: url, id: option.id, title: option.title) else {
-                        self.publishSubtitleError(for: option)
-                        return
+                    let extensionName = URL(fileURLWithPath: option.title).pathExtension.lowercased()
+                    if ["srt", "ass", "ssa"].contains(extensionName) {
+                        let data = try await self.subtitleDataLoader(url)
+                        let cues = try SubtitleCueParser.parse(data: data, fileName: option.title)
+                        guard !Task.isCancelled, self.sessionID == activeSession else { return }
+                        self.controller.selectEmbeddedSubtitle(id: nil)
+                        self.subtitleOverlay.install(cues)
+                        self.subtitleSelection = selection
+                    } else {
+                        guard self.controller.addExternalSubtitle(url: url, id: option.id, title: option.title) else {
+                            self.publishSubtitleError(for: option)
+                            return
+                        }
+                        self.subtitleSelection = selection
                     }
-                    self.subtitleSelection = selection
                 } catch AListAPIError.unauthorized {
                     guard !Task.isCancelled, self.sessionID == activeSession else { return }
                     await self.onUnauthorized()
@@ -168,6 +203,49 @@ final class PlayerCoordinator: ObservableObject {
                 }
             }
             await subtitleSelectionTask?.value
+        }
+    }
+
+    func updateSubtitleAppearance(_ appearance: SubtitleAppearance) {
+        guard subtitleAppearance != appearance else { return }
+        subtitleAppearance = appearance
+        subtitleAppearanceStore.save(appearance)
+        controller.setSubtitleAppearance(appearance)
+        guard currentObject != nil, state == .playing else { return }
+        subtitleAppearanceReloadID = UUID()
+        let reloadID = subtitleAppearanceReloadID
+        Task { [weak self] in
+            await self?.reloadForSubtitleAppearance(reloadID: reloadID)
+        }
+    }
+
+    func resetSubtitleAppearance() {
+        updateSubtitleAppearance(.default)
+    }
+
+    private func reloadForSubtitleAppearance(reloadID: UUID) async {
+        guard let path = currentObject?.virtualPath else { return }
+        let activeSession = sessionID
+        let position = controller.currentTime
+        let selectionToRestore = subtitleSelection
+        let wasPlaying = controller.isPlaying
+
+        do {
+            let detail = try await api.get(path: path)
+            guard sessionID == activeSession, subtitleAppearanceReloadID == reloadID else { return }
+            let url = try PlayableURLValidator.validate(detail.rawURL)
+            controller.replaceCurrentItem(url: url, preservingSelections: true)
+            if position > 0 { await controller.seek(to: position) }
+            guard sessionID == activeSession, subtitleAppearanceReloadID == reloadID else { return }
+            if wasPlaying { controller.play() }
+            if case let .external(fileID) = selectionToRestore {
+                await selectSubtitle(.external(fileID: fileID))
+            }
+        } catch AListAPIError.unauthorized {
+            guard sessionID == activeSession, subtitleAppearanceReloadID == reloadID else { return }
+            await onUnauthorized()
+        } catch {
+            // Subtitle renderer options must never turn a styling change into a playback failure.
         }
     }
 
