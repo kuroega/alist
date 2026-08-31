@@ -60,6 +60,7 @@ final class AppContainer: ObservableObject {
         let sessionStore = SessionCredentialStore(backing: KeychainCredentialStore())
         credentialStore = sessionStore
         preferences = ConnectionPreferences()
+        subtitleAppearanceStore = SubtitleAppearanceStore()
         clientFactory = { baseURL, clientID in
             AListClient(
                 baseURL: baseURL,
