@@ -60,6 +60,142 @@ http://<VM_IP>:5244
 http://10.127.1.109:5244
 ```
 
+## 3.1 Windows 原生 SSH 命令行调试
+
+Windows 端使用系统自带的 OpenSSH Client，不需要 PuTTY、WSL 或第三方隧道程序。脚本入口是仓库中的 `tools/windows/Invoke-AlistVmSsh.ps1`。VM 必须先开机，桥接网络继续使用当前 VM IP；脚本不会自动启动 VMware、修改 VMware 网络或绕过 SSH 认证。
+
+### 3.1.1 在 Alpine VM 启用 SSH
+
+第一次配置请在 VMware 控制台执行，而不是把密码写入脚本：
+
+```sh
+apk add --no-cache openssh
+rc-update add sshd default
+rc-service sshd start
+rc-service sshd status
+```
+
+确认 SSH 服务监听 22 端口：
+
+```sh
+ss -lnt | grep ':22'
+```
+
+### 3.1.2 使用 Windows Ed25519 密钥
+
+在 Windows PowerShell 执行。密钥口令由 `ssh-keygen` 交互读取，不要写入命令行或仓库：
+
+```powershell
+$key = Join-Path $env:USERPROFILE '.ssh\alist-vm_ed25519'
+New-Item -ItemType Directory -Path (Split-Path $key) -Force | Out-Null
+if (-not (Test-Path -LiteralPath $key)) {
+  ssh-keygen -t ed25519 -f $key -C 'alist-vm-debug'
+}
+Get-Content "$key.pub"
+```
+
+将上条命令输出的**整行公钥**粘贴到 VM 控制台的 `/home/kuroega/.ssh/authorized_keys`，然后修正权限：
+
+```sh
+install -d -m 700 -o kuroega -g kuroega /home/kuroega/.ssh
+vi /home/kuroega/.ssh/authorized_keys
+chmod 600 /home/kuroega/.ssh/authorized_keys
+chown -R kuroega:kuroega /home/kuroega/.ssh
+```
+
+首次连接前，在 VM 控制台查看 SSH host key 指纹：
+
+```sh
+ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+```
+
+在 Windows 读取同一主机的公钥并与控制台指纹人工核对；确认一致后才写入 Windows 的 known_hosts：
+
+```powershell
+ssh-keyscan -t ed25519 10.127.1.109
+ssh-keyscan -t ed25519 10.127.1.109 | Out-File -FilePath "$env:USERPROFILE\.ssh\known_hosts" -Encoding ascii -Append
+```
+
+脚本固定使用 `StrictHostKeyChecking=yes`。如果指纹不一致，停止操作并检查 VM IP、网络和 known_hosts，不要改成 `StrictHostKeyChecking=no`。
+
+### 3.1.3 Agent 命令行执行和 HTTP 隧道
+
+这个入口面向 Agent 或其他自动化调用，不提供交互式 shell。默认模式是 `Exec`，每次调用只建立一个 SSH 连接、执行一条远程命令并退出。远端 stdout、stderr 会原样回传，SSH 的退出码也会作为脚本退出码返回；因此调用方可以直接根据退出码判断维护操作是否成功。
+
+可选地在 Windows Agent 进程的环境中设置连接参数；不设置时脚本默认使用本手册中的 VM 地址和 `kuroega` 用户：
+
+```powershell
+$env:ALIST_VM_HOST = '10.127.1.109'
+$env:ALIST_VM_USER = 'kuroega'
+$env:ALIST_VM_IDENTITY_FILE = "$env:USERPROFILE\.ssh\alist-vm_ed25519"
+```
+
+先做连通性检查，再执行远程命令。`-Command` 是 `-RemoteCommand` 的别名，命令作为一个字符串传给 VM 内的远程 shell：
+
+```powershell
+& .\tools\windows\Invoke-AlistVmSsh.ps1 -Mode Doctor
+& .\tools\windows\Invoke-AlistVmSsh.ps1 -Mode Exec -Command 'rc-service alist status'
+& .\tools\windows\Invoke-AlistVmSsh.ps1 -Command 'tail -n 100 /var/log/alist.log'
+& .\tools\windows\Invoke-AlistVmSsh.ps1 -Command 'cd /opt/alist && go test ./...'
+```
+
+`Exec` 和 `Tunnel` 使用 `BatchMode=yes`、`-T` 和 `StrictHostKeyChecking=yes`，不会等待密码输入，也不会分配 TTY。调用方应先完成公钥认证和 known_hosts 配置；不应把密码拼接到 `-Command` 或任何环境变量中。远端命令中的 `&&`、管道和重定向由 VM 的 shell 解释，不会在 Windows 本地执行。
+
+需要从 Windows Agent 访问 VM 内 AList 或临时 debug/pprof 进程时，用独立的长生命周期 Agent 任务运行隧道命令：
+
+```powershell
+& .\tools\windows\Invoke-AlistVmSsh.ps1 -Mode Tunnel
+```
+
+`Tunnel` 会保持前台 SSH 进程，调用方应保存该进程句柄并在任务结束时终止它。隧道两端都显式绑定回环地址，将 Windows `127.0.0.1:15244` 转发到 VM `127.0.0.1:5244`；隧道建立后，其他 Agent 命令可以请求：
+
+```powershell
+Invoke-WebRequest 'http://127.0.0.1:15244/api/public/settings'
+```
+
+脚本不向标准输出混入连接提示，便于 Agent 直接消费远端命令输出。`-DryRun` 可用于检查最终 OpenSSH 参数而不执行连接：
+
+```powershell
+& .\tools\windows\Invoke-AlistVmSsh.ps1 -Mode Tunnel -DryRun
+```
+
+如果要临时采集 Go pprof，Agent 需要先通过 `Exec` 停止 OpenRC 服务，再启动一个受管理的长生命周期 debug 命令；不要把 debug 服务作为公网服务运行：
+
+```powershell
+& .\tools\windows\Invoke-AlistVmSsh.ps1 -Mode Exec -Command 'rc-service alist stop'
+& .\tools\windows\Invoke-AlistVmSsh.ps1 -Mode Tunnel
+```
+
+然后由 VM 端的受管理命令启动：
+
+```sh
+/opt/alist/alist --debug --data /var/lib/alist --log-std server
+```
+
+通过隧道访问：
+
+```powershell
+Invoke-WebRequest 'http://127.0.0.1:15244/debug/pprof/'
+```
+
+采集完成后停止 debug 进程并执行：
+
+```powershell
+& .\tools\windows\Invoke-AlistVmSsh.ps1 -Mode Exec -Command 'rc-service alist start'
+```
+
+当前代码只有在 `--debug` 或 `--dev` 下注册 `/debug/pprof/*`，且这些路由没有 AList 用户认证；隧道是必要的访问边界。
+
+### 3.1.4 VMware NAT 网络
+
+当前 VM 使用桥接模式，直接连接 `10.127.1.109:22`。如果改为 VMware NAT，必须先在 VMware Virtual Network Editor 中配置宿主机端口到 VM `22` 的映射；例如宿主机 `127.0.0.1:2222` 映射到 VM `22`，然后使用：
+
+```powershell
+& .\tools\windows\Invoke-AlistVmSsh.ps1 -VmHost 127.0.0.1 -SshPort 2222 -Mode Exec -Command 'rc-service alist status'
+```
+
+AList HTTP 隧道的远端目标仍是 VM 内的 `127.0.0.1:5244`，不需要额外暴露 5244。NAT 映射、VM 电源状态、Windows 防火墙和 DHCP 地址不由脚本管理。
+
 ## 4. 服务操作
 
 ```sh
