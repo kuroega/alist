@@ -164,15 +164,15 @@ final class PlayerCoordinatorTests: XCTestCase {
             listPages: [[AListObject(virtualPath: "/Movie.en.srt", name: "Movie.en.srt", isDirectory: false)]]
         )
         let player = PlayerFakeController()
-        player.acceptExternalSubtitles = true
         let coordinator = makeCoordinator(api: api, player: player)
 
         await coordinator.play(object: object("/Movie.mp4"))
         try await waitUntil { coordinator.externalSubtitleDiscoveryState == .loaded }
         await coordinator.selectSubtitle(.external(fileID: "/Movie.en.srt"))
-        try await waitUntil { player.addedExternalSubtitleIDs == ["/Movie.en.srt"] }
 
         XCTAssertEqual(coordinator.subtitleSelection, .external(fileID: "/Movie.en.srt"))
+        XCTAssertEqual(coordinator.subtitleOverlay.cues.map(\.text), ["Native SRT subtitle"])
+        XCTAssertTrue(player.addedExternalSubtitleIDs.isEmpty)
     }
 
     func testInvalidExternalSubtitleURLPreservesCurrentSelection() async throws {
@@ -194,10 +194,10 @@ final class PlayerCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(coordinator.subtitleSelection, .embedded(trackID: "embedded.en"))
         XCTAssertEqual(coordinator.subtitleSelectionError, "Unable to load subtitle “Movie.srt”.")
-        XCTAssertTrue(player.addedExternalSubtitleIDs.isEmpty)
+        XCTAssertTrue(coordinator.subtitleOverlay.cues.isEmpty)
     }
 
-    func testVLCRejectedExternalSubtitlePreservesEmbeddedSelection() async throws {
+    func testInvalidNativeSubtitlePreservesEmbeddedSelection() async throws {
         let api = PlayerFakeAPI(
             details: [
                 detail(url: "https://media.example/Movie.mp4", path: "/Movie.mp4"),
@@ -207,7 +207,9 @@ final class PlayerCoordinatorTests: XCTestCase {
         )
         let player = PlayerFakeController()
         player.embeddedSubtitleTracks = [PlaybackTrackOption(id: "embedded.en", title: "English", languageCode: "en", codec: "WebVTT", isSelected: false)]
-        let coordinator = makeCoordinator(api: api, player: player)
+        let coordinator = makeCoordinator(api: api, player: player, subtitleDataLoader: { _ in
+            throw AListAPIError.invalidResponse
+        })
 
         await coordinator.play(object: object("/Movie.mp4"))
         try await waitUntil { coordinator.externalSubtitleDiscoveryState == .loaded }
@@ -216,7 +218,7 @@ final class PlayerCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(coordinator.subtitleSelection, .embedded(trackID: "embedded.en"))
         XCTAssertEqual(coordinator.subtitleSelectionError, "Unable to load subtitle “Movie.srt”.")
-        XCTAssertTrue(player.addedExternalSubtitleIDs.isEmpty)
+        XCTAssertTrue(coordinator.subtitleOverlay.cues.isEmpty)
     }
 
     func testExternalSubtitleDiscoveryFailureRetriesWithoutStoppingPlayback() async throws {
@@ -290,7 +292,6 @@ final class PlayerCoordinatorTests: XCTestCase {
             listPages: [[AListObject(virtualPath: "/Movie.srt", name: "Movie.srt", isDirectory: false)]]
         )
         let player = PlayerFakeController()
-        player.acceptExternalSubtitles = true
         player.currentTime = 42
         player.audioTracks = [
             PlaybackTrackOption(id: "audio.en", title: "English", languageCode: "en", codec: "AAC", isSelected: false),
@@ -351,13 +352,42 @@ final class PlayerCoordinatorTests: XCTestCase {
 
         XCTAssertNil(coordinator.subtitleSelectionError)
         XCTAssertEqual(coordinator.state, .idle)
-        XCTAssertTrue(player.addedExternalSubtitleIDs.isEmpty)
+        XCTAssertTrue(coordinator.subtitleOverlay.cues.isEmpty)
+    }
+
+    func testUpdatingSubtitleAppearanceUpdatesControllerAndReloadsPlayingMedia() async throws {
+        let suite = "PlayerCoordinatorSubtitleAppearanceTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let appearanceStore = SubtitleAppearanceStore(defaults: defaults)
+        let api = PlayerFakeAPI(details: [
+            detail(url: "https://media.example/first", path: "/video.mp4"),
+            detail(url: "https://media.example/reloaded", path: "/video.mp4")
+        ])
+        let player = PlayerFakeController()
+        let coordinator = PlayerCoordinator(
+            api: api,
+            controller: player,
+            progressStore: PlaybackProgressStore(defaults: defaults),
+            subtitleAppearanceStore: appearanceStore,
+            baseURL: URL(string: "https://alist.example")!,
+            username: "alice"
+        )
+
+        await coordinator.play(object: object("/video.mp4"))
+        coordinator.updateSubtitleAppearance(SubtitleAppearance(font: .serif, color: .yellow, opacity: .high))
+        try await waitUntil { player.replacedURLs.count == 2 }
+
+        XCTAssertEqual(player.subtitleAppearance, SubtitleAppearance(font: .serif, color: .yellow, opacity: .high))
+        XCTAssertEqual(appearanceStore.load(), player.subtitleAppearance)
+        XCTAssertEqual(player.replacedURLs.last?.absoluteString, "https://media.example/reloaded")
     }
 
     private func makeCoordinator(
         api: PlayerFakeAPI,
         player: PlayerFakeController,
-        store: PlaybackProgressStore? = nil
+        store: PlaybackProgressStore? = nil,
+        subtitleDataLoader: @escaping @Sendable (URL) async throws -> Data = { url in try nativeSubtitleData(for: url) }
     ) -> PlayerCoordinator {
         let progressStore: PlaybackProgressStore
         if let store {
@@ -372,9 +402,18 @@ final class PlayerCoordinatorTests: XCTestCase {
             api: api,
             controller: player,
             progressStore: progressStore,
+            subtitleAppearanceStore: SubtitleAppearanceStore(defaults: progressStoreDefaults()),
             baseURL: URL(string: "https://alist.example")!,
-            username: "alice"
+            username: "alice",
+            subtitleDataLoader: subtitleDataLoader
         )
+    }
+
+    private func progressStoreDefaults() -> UserDefaults {
+        let suite = "PlayerCoordinatorSubtitleAppearanceTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        return defaults
     }
 
     private func object(_ path: String) -> AListObject {
@@ -500,13 +539,15 @@ private final class PlayerFakeController: PlayerControlling {
     var audioTracks: [PlaybackTrackOption] = []
     var embeddedSubtitleTracks: [PlaybackTrackOption] = []
     var selectedExternalSubtitleID: String?
+    var subtitleAppearance = SubtitleAppearance.default
     var diagnostics: PlaybackDiagnosticsSnapshot?
     private(set) var replacedURLs: [URL] = []
     private(set) var preserveSelectionsValues: [Bool] = []
     private(set) var seekValues: [TimeInterval] = []
     private(set) var playCount = 0
-    var acceptExternalSubtitles = false
+    var shouldFailExternalSubtitleAdd = false
     private(set) var addedExternalSubtitleIDs: [String] = []
+    private var loadedExternalSubtitleIDs = Set<String>()
     private var continuation: AsyncStream<PlayerEvent>.Continuation!
     private let log: LockedEventLog?
 
@@ -534,13 +575,18 @@ private final class PlayerFakeController: PlayerControlling {
             PlaybackTrackOption(id: $0.id, title: $0.title, languageCode: $0.languageCode, codec: $0.codec, isSelected: $0.id == id)
         }
     }
-    func selectLoadedExternalSubtitle(id: String) -> Bool { false }
-    func addExternalSubtitle(url: URL, id: String, title: String) -> Bool {
-        guard acceptExternalSubtitles else { return false }
-        addedExternalSubtitleIDs.append(id)
+    func selectLoadedExternalSubtitle(id: String) -> Bool {
+        guard loadedExternalSubtitleIDs.contains(id) else { return false }
         selectedExternalSubtitleID = id
         return true
     }
+    func addExternalSubtitle(url: URL, id: String, title: String) -> Bool {
+        guard !shouldFailExternalSubtitleAdd else { return false }
+        addedExternalSubtitleIDs.append(id)
+        loadedExternalSubtitleIDs.insert(id)
+        return selectLoadedExternalSubtitle(id: id)
+    }
+    func setSubtitleAppearance(_ appearance: SubtitleAppearance) { subtitleAppearance = appearance }
     func setDiagnosticsEnabled(_ enabled: Bool) {}
     func emit(_ event: PlayerEvent) { continuation.yield(event) }
 }
@@ -554,5 +600,18 @@ private final class LockedEventLog: @unchecked Sendable {
     }
     func append(_ value: String) {
         lock.lock(); storage.append(value); lock.unlock()
+    }
+}
+
+private func nativeSubtitleData(for url: URL) throws -> Data {
+    switch url.lastPathComponent {
+    case "Movie.en.srt", "Movie.srt":
+        return Data("""
+        1
+        00:00:40,000 --> 00:00:50,000
+        Native SRT subtitle
+        """.utf8)
+    default:
+        throw AListAPIError.invalidResponse
     }
 }

@@ -17,6 +17,7 @@ final class ConnectionViewModel: ObservableObject {
     @Published private(set) var canRetryRecovery = false
     private(set) var activeAPI: (any AListAPI)?
     private(set) var activeConnection: StoredConnection?
+    var rememberedConnection: StoredConnection? { preferences.loadConnection() }
 
     private let preferences: ConnectionPreferences
     private let credentialStore: any CredentialStore

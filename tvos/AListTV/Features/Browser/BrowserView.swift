@@ -1,5 +1,4 @@
 import SwiftUI
-import UIKit
 
 struct BrowserView: View {
     @ObservedObject var viewModel: BrowserViewModel
@@ -14,8 +13,9 @@ struct BrowserView: View {
     @AppStorage("com.alist.tv.browser-sort-ascending") private var isSortAscending = true
     @State private var isSortDialogPresented = false
 
+    private let gridSpacing: CGFloat = 48
     private let columns = [
-        GridItem(.adaptive(minimum: 280, maximum: 360), spacing: 36)
+        GridItem(.adaptive(minimum: 280, maximum: 360), spacing: 48)
     ]
 
     var body: some View {
@@ -112,16 +112,12 @@ struct BrowserView: View {
 
     private var grid: some View {
         ScrollView {
-            LazyVGrid(columns: columns, spacing: 42) {
+            LazyVGrid(columns: columns, spacing: gridSpacing) {
                 ForEach(viewModel.items) { item in
                     Button {
                         viewModel.open(item)
                     } label: {
-                        BrowserCard(
-                            item: item,
-                            artwork: viewModel.artwork(for: item),
-                            loadArtwork: { viewModel.loadArtwork(for: item) }
-                        )
+                        BrowserCard(item: item)
                     }
                     .buttonStyle(.card)
                     .focused($focusedPath, equals: item.virtualPath)
@@ -142,11 +138,7 @@ struct BrowserView: View {
                     Button {
                         viewModel.open(item)
                     } label: {
-                        BrowserListRow(
-                            item: item,
-                            artwork: viewModel.artwork(for: item),
-                            loadArtwork: { viewModel.loadArtwork(for: item) }
-                        )
+                        BrowserListRow(item: item)
                     }
                     .buttonStyle(.card)
                     .focused($focusedPath, equals: item.virtualPath)
@@ -196,17 +188,12 @@ struct BrowserView: View {
 
 private struct BrowserCard: View {
     let item: AListObject
-    let artwork: UIImage?
-    let loadArtwork: () -> Void
-
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            BrowserThumbnail(item: item, artwork: artwork, loadArtwork: loadArtwork)
+            BrowserFileBadgeView(badge: BrowserFileBadge(item: item), size: .card)
                 .frame(height: 170)
                 .frame(maxWidth: .infinity)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 18))
-                .clipShape(RoundedRectangle(cornerRadius: 18))
             Text(item.name)
                 .font(.headline)
                 .lineLimit(2)
@@ -215,20 +202,18 @@ private struct BrowserCard: View {
                 .foregroundStyle(.secondary)
         }
         .padding(18)
+        .accessibilityLabel(item.name)
+        .accessibilityValue(BrowserFileBadge(item: item).accessibilityDescription)
     }
 }
 
 private struct BrowserListRow: View {
     let item: AListObject
-    let artwork: UIImage?
-    let loadArtwork: () -> Void
 
     var body: some View {
         HStack(spacing: 24) {
-            BrowserThumbnail(item: item, artwork: artwork, loadArtwork: loadArtwork)
+            BrowserFileBadgeView(badge: BrowserFileBadge(item: item), size: .list)
                 .frame(width: 160, height: 90)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
-                .clipShape(RoundedRectangle(cornerRadius: 12))
 
             VStack(alignment: .leading, spacing: 8) {
                 Text(item.name)
@@ -242,60 +227,7 @@ private struct BrowserListRow: View {
             Spacer()
         }
         .padding(18)
-    }
-}
-
-private struct BrowserThumbnail: View {
-    let item: AListObject
-    let artwork: UIImage?
-    let loadArtwork: () -> Void
-
-    @ViewBuilder
-    var body: some View {
-        if let artwork {
-            Image(uiImage: artwork)
-                .resizable()
-                .scaledToFill()
-        } else if let value = item.thumbnail,
-                  let url = try? PlayableURLValidator.validate(value) {
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case let .success(image):
-                    image.resizable().scaledToFill()
-                case .failure:
-                    placeholder.onAppear(perform: loadArtwork)
-                case .empty:
-                    placeholder
-                @unknown default:
-                    placeholder
-                }
-            }
-        } else if item.fileType == .audio || item.fileType == .video {
-            placeholder
-                .onAppear(perform: loadArtwork)
-        } else {
-            placeholder
-        }
-    }
-
-    private var placeholder: some View {
-        Image(systemName: item.isDirectory ? "folder.fill" : symbolForType)
-            .font(.system(size: 64))
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private var symbolForType: String {
-        switch item.fileType {
-        case .folder:
-            return "folder.fill"
-        case .video:
-            return "play.rectangle.fill"
-        case .audio:
-            return "music.note"
-        case .image:
-            return "photo.fill"
-        default:
-            return "doc.fill"
-        }
+        .accessibilityLabel(item.name)
+        .accessibilityValue(BrowserFileBadge(item: item).accessibilityDescription)
     }
 }

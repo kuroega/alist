@@ -48,6 +48,27 @@ actor FixtureAListAPI: AListAPI {
     }
 }
 
+enum FixtureSubtitleDataLoader {
+    static func load(from url: URL) async throws -> Data {
+        switch url.lastPathComponent {
+        case "Sample.zh.srt":
+            return Data("""
+            1
+            00:00:40,000 --> 00:00:50,000
+            你好，世界
+            """.utf8)
+        case "Unrelated.ass":
+            return Data("""
+            [Events]
+            Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+            Dialogue: 0,0:00:40.00,0:00:50.00,Default,,0,0,0,,Fixture ASS subtitle
+            """.utf8)
+        default:
+            throw AListAPIError.invalidResponse
+        }
+    }
+}
+
 @MainActor
 final class FixturePlayerController: ObservableObject, PlayerControlling {
     let events: AsyncStream<PlayerEvent>
@@ -64,6 +85,7 @@ final class FixturePlayerController: ObservableObject, PlayerControlling {
     ]
     @Published private(set) var embeddedSubtitleTracks = [PlaybackTrackOption(id: "subtitle.en", title: "English", languageCode: "en", codec: "WebVTT", isSelected: true)]
     @Published private(set) var selectedExternalSubtitleID: String?
+    @Published private(set) var subtitleAppearance = SubtitleAppearance.default
     @Published private(set) var diagnostics: PlaybackDiagnosticsSnapshot?
     private var loadedExternalIDs = Set<String>()
     var shouldFailExternalSubtitleAdd = false
@@ -77,6 +99,7 @@ final class FixturePlayerController: ObservableObject, PlayerControlling {
     func selectEmbeddedSubtitle(id: String?) { selectedExternalSubtitleID = nil; embeddedSubtitleTracks = embeddedSubtitleTracks.map { PlaybackTrackOption(id: $0.id, title: $0.title, languageCode: $0.languageCode, codec: $0.codec, isSelected: $0.id == id) } }
     func selectLoadedExternalSubtitle(id: String) -> Bool { guard loadedExternalIDs.contains(id) else { return false }; selectedExternalSubtitleID = id; embeddedSubtitleTracks = embeddedSubtitleTracks.map { PlaybackTrackOption(id: $0.id, title: $0.title, languageCode: $0.languageCode, codec: $0.codec, isSelected: false) }; return true }
     func addExternalSubtitle(url: URL, id: String, title: String) -> Bool { if shouldFailExternalSubtitleAdd { return false }; loadedExternalIDs.insert(id); return selectLoadedExternalSubtitle(id: id) }
+    func setSubtitleAppearance(_ appearance: SubtitleAppearance) { subtitleAppearance = appearance }
     func setDiagnosticsEnabled(_ enabled: Bool) {
         diagnostics = enabled ? PlaybackDiagnosticsSnapshot(currentTime: currentTime, duration: duration, isPlaying: isPlaying, isSeekable: isSeekable, inputBytesRead: 1_024_000, inputBitrate: 125_000, demuxBytesRead: 1_000_000, demuxBitrate: 120_000, demuxCorrupted: 0, demuxDiscontinuity: 0, decodedVideo: 300, decodedAudio: 500, displayedPictures: 298, latePictures: 1, lostPictures: 1, playedAudioBuffers: 500, lostAudioBuffers: 0, videoResolution: "1920×1080", videoFrameRate: 24, videoCodec: "H.264", audioTitle: "English", audioLanguageCode: "en", audioCodec: "AAC", subtitleTitle: "English", subtitleLanguageCode: "en", subtitleCodec: "WebVTT") : nil
     }

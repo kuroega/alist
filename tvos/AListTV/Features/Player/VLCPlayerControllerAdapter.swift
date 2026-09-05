@@ -17,6 +17,7 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
     @Published private(set) var audioTracks: [PlaybackTrackOption] = []
     @Published private(set) var embeddedSubtitleTracks: [PlaybackTrackOption] = []
     @Published private(set) var selectedExternalSubtitleID: String?
+    @Published private(set) var subtitleAppearance = SubtitleAppearance.default
     @Published private(set) var diagnostics: PlaybackDiagnosticsSnapshot?
 
     private let mediaPlayer = VLCMediaPlayer()
@@ -75,6 +76,7 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
         }
         media.addOption(":network-caching=3000")
         media.addOption(":http-reconnect")
+        subtitleAppearance.vlcMediaOptions.forEach(media.addOption)
         mediaPlayer.media = media
     }
 
@@ -132,6 +134,10 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
             return false
         }
         return true
+    }
+
+    func setSubtitleAppearance(_ appearance: SubtitleAppearance) {
+        subtitleAppearance = appearance
     }
 
     func setDiagnosticsEnabled(_ enabled: Bool) {
