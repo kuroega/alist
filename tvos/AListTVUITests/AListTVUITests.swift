@@ -118,6 +118,45 @@ final class AListTVUITests: XCTestCase {
         remote.press(.select)
         XCTAssertEqual(currentTime.label, "00:45")
     }
+
+    func testResumePromptAndRemotePlaybackToggles() {
+        openFixturePlayer()
+        remote.press(.menu)
+        remote.press(.menu)
+
+        let video = app.buttons["browser.item./Sample.mp4"]
+        XCTAssertTrue(video.waitForExistence(timeout: 3))
+        focusAndSelect(video, direction: .right)
+
+        let prompt = app.descendants(matching: .any)["player.resume-prompt"]
+        XCTAssertTrue(prompt.waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS '00:00:45'")).firstMatch.exists)
+        XCTAssertTrue(app.buttons["player.resume"].exists)
+
+        focusAndSelect(app.buttons["player.resume"], direction: .up)
+        let playPause = app.buttons["player.play-pause"]
+        XCTAssertTrue(playPause.waitForExistence(timeout: 3))
+        XCTAssertEqual(playPause.label, "Pause")
+
+        remote.press(.playPause)
+        XCTAssertEqual(playPause.label, "Play")
+        remote.press(.playPause)
+        XCTAssertEqual(playPause.label, "Pause")
+
+        remote.press(.menu)
+        XCTAssertFalse(playPause.waitForExistence(timeout: 1))
+        remote.press(.playPause)
+        XCTAssertTrue(playPause.waitForExistence(timeout: 3))
+        XCTAssertEqual(playPause.label, "Play")
+        remote.press(.playPause)
+        XCTAssertEqual(playPause.label, "Pause")
+
+        remote.press(.menu)
+        XCTAssertFalse(playPause.waitForExistence(timeout: 1))
+        remote.press(.select)
+        XCTAssertEqual(playPause.label, "Play")
+    }
+
     func testSubtitleSelectionJourney() {
         openFixturePlayer()
         let subtitles = app.buttons["player.subtitles"]

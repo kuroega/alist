@@ -19,6 +19,7 @@ final class AppContainer: ObservableObject {
     private let controllerFactory: @MainActor () -> any PlayerControlling
     private let subtitleDataLoader: @Sendable (URL) async throws -> Data
     private let subtitleAppearanceStore: SubtitleAppearanceStore
+    private let playbackProgressStore: PlaybackProgressStore
     private var didAttemptRestore = false
 
     init(arguments: [String] = ProcessInfo.processInfo.arguments) {
@@ -28,6 +29,7 @@ final class AppContainer: ObservableObject {
         let clientFactory: AListClientFactory
         let controllerFactory: @MainActor () -> any PlayerControlling
         let subtitleDataLoader: @Sendable (URL) async throws -> Data
+        let playbackProgressStore: PlaybackProgressStore
 
 #if DEBUG
         if arguments.contains("ui-testing") {
@@ -38,6 +40,7 @@ final class AppContainer: ObservableObject {
             credentialStore = memoryStore
             preferences = ConnectionPreferences(defaults: defaults)
             subtitleAppearanceStore = SubtitleAppearanceStore(defaults: defaults)
+            playbackProgressStore = PlaybackProgressStore(defaults: defaults)
             clientFactory = { _, _ in fixtureAPI }
             controllerFactory = { FixturePlayerController() }
             subtitleDataLoader = FixtureSubtitleDataLoader.load
@@ -46,6 +49,7 @@ final class AppContainer: ObservableObject {
             credentialStore = sessionStore
             preferences = ConnectionPreferences()
             subtitleAppearanceStore = SubtitleAppearanceStore()
+            playbackProgressStore = PlaybackProgressStore()
             clientFactory = { baseURL, clientID in
                 AListClient(
                     baseURL: baseURL,
@@ -61,6 +65,7 @@ final class AppContainer: ObservableObject {
         credentialStore = sessionStore
         preferences = ConnectionPreferences()
         subtitleAppearanceStore = SubtitleAppearanceStore()
+        playbackProgressStore = PlaybackProgressStore()
         clientFactory = { baseURL, clientID in
             AListClient(
                 baseURL: baseURL,
@@ -75,6 +80,7 @@ final class AppContainer: ObservableObject {
         self.controllerFactory = controllerFactory
         self.subtitleDataLoader = subtitleDataLoader
         self.subtitleAppearanceStore = subtitleAppearanceStore
+        self.playbackProgressStore = playbackProgressStore
         connectionViewModel = ConnectionViewModel(
             preferences: preferences,
             credentialStore: credentialStore,
@@ -127,7 +133,7 @@ final class AppContainer: ObservableObject {
         let player = PlayerCoordinator(
             api: api,
             controller: controllerFactory(),
-            progressStore: PlaybackProgressStore(),
+            progressStore: playbackProgressStore,
             subtitleAppearanceStore: subtitleAppearanceStore,
             baseURL: connection.baseURL,
             username: connection.username,

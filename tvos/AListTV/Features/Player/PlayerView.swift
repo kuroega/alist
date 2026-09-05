@@ -58,6 +58,7 @@ struct VLCPlayerContainerView: View {
             play: adapter.play,
             pause: adapter.pause,
             seek: { seconds in Task { await adapter.seek(to: seconds) } },
+            seekAndPlay: { seconds in Task { await adapter.seek(to: seconds); adapter.play() } },
             selectAudio: adapter.selectAudioTrack,
             setDiagnosticsEnabled: adapter.setDiagnosticsEnabled,
             close: { coordinator.playerDidDisappear(); dismiss() }
@@ -94,19 +95,19 @@ struct FixturePlayerContainerView: View {
             play: fixture.play,
             pause: fixture.pause,
             seek: { seconds in Task { await fixture.seek(to: seconds) } },
+            seekAndPlay: { seconds in Task { await fixture.seek(to: seconds); fixture.play() } },
             selectAudio: fixture.selectAudioTrack,
             setDiagnosticsEnabled: fixture.setDiagnosticsEnabled,
             close: { coordinator.playerDidDisappear(); dismiss() }
         ) {
             Color.black
-                .overlay(Image(systemName: "play.rectangle.fill").font(.system(size: 96)).foregroundStyle(.white.opacity(0.88)))
         }
     }
 }
 #endif
 
 private struct ImmersivePlaybackStage<VideoContent: View>: View {
-    private enum FocusTarget: Hashable { case surface, close, playPause, rewind, timeline, forward, subtitles, audio, diagnostics, panel, appearance, appearanceReset, appearanceBack }
+    private enum FocusTarget: Hashable { case surface, close, playPause, rewind, timeline, forward, subtitles, audio, diagnostics, panel, appearance, appearanceReset, appearanceBack, resume, startOver }
     private enum PresentedPanel: Equatable { case subtitles, audio, subtitleAppearance }
 
     @ObservedObject var coordinator: PlayerCoordinator
@@ -127,6 +128,7 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
     let play: () -> Void
     let pause: () -> Void
     let seek: (TimeInterval) -> Void
+    let seekAndPlay: (TimeInterval) -> Void
     let selectAudio: (String) -> Void
     let setDiagnosticsEnabled: (Bool) -> Void
     let close: () -> Void
@@ -136,6 +138,7 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
     @State private var hideChromeTask: Task<Void, Never>?
     @State private var presentedPanel: PresentedPanel?
     @State private var scrubTarget: TimeInterval?
+    @State private var touchScrubOrigin: TimeInterval?
     @FocusState private var focus: FocusTarget?
 
     private var hasSubtitleOptions: Bool {
@@ -148,7 +151,13 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
             MenuKeyCommandCapture(
                 onMenu: handleExitCommand,
                 onDirectional: { revealChrome(focus: .playPause) },
-                interceptsDirectional: !chromeVisible && presentedPanel == nil && diagnostics == nil
+                onSelect: handleSelectCommand,
+                onPlayPause: togglePlayback,
+                onPanChanged: handleTouchPanChanged,
+                onPanEnded: handleTouchPanEnded,
+                interceptsDirectional: !chromeVisible && presentedPanel == nil && diagnostics == nil,
+                interceptsSelect: shouldInterceptSelect,
+                interceptsPlayPause: !chromeVisible && presentedPanel == nil && diagnostics == nil && coordinator.resumePrompt == nil
             )
                 .frame(width: 1, height: 1)
                 .allowsHitTesting(false)
@@ -191,18 +200,27 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
             }
         }
         .ignoresSafeArea()
-        .defaultFocus($focus, .playPause)
+        .defaultFocus($focus, coordinator.resumePrompt == nil ? .playPause : .resume)
         .animation(.easeOut(duration: 0.22), value: chromeVisible)
         .animation(.easeOut(duration: 0.2), value: presentedPanel != nil)
         .onAppear {
-            revealChrome(focus: .playPause)
+            revealChrome(focus: coordinator.resumePrompt == nil ? .playPause : .resume)
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(100))
                 guard !Task.isCancelled else { return }
-                focus = .playPause
+                focus = coordinator.resumePrompt == nil ? .playPause : .resume
             }
         }
         .onDisappear { hideChromeTask?.cancel() }
+        .onChange(of: coordinator.resumePrompt) { _, prompt in
+            if prompt != nil {
+                hideChromeTask?.cancel()
+                chromeVisible = true
+                focus = .resume
+            } else if focus == .resume || focus == .startOver {
+                revealChrome(focus: .playPause)
+            }
+        }
         .onChange(of: currentTime) { _, time in subtitleOverlay.update(time: time) }
         .onChange(of: isPlaying) { _, playing in
             if playing { scheduleChromeHideIfNeeded() } else { revealChrome() }
@@ -287,6 +305,9 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
 
     private var transportDock: some View {
         VStack(spacing: 22) {
+            if let prompt = coordinator.resumePrompt {
+                resumePromptView(prompt)
+            }
             timeline
             HStack(spacing: 16) {
                 Button(action: { performSeek(currentTime - 10) }) {
@@ -334,6 +355,40 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
         .background(.black.opacity(0.34), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
     }
 
+    private func resumePromptView(_ prompt: PlaybackResumePrompt) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Continue playback?")
+                        .font(.headline)
+                    Text("Resume from \(PlaybackPresentation.resumeTimeText(prompt.position))")
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.72))
+                }
+                Spacer()
+                Text("\(prompt.secondsRemaining)s")
+                    .font(.title3.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.tint)
+            }
+            HStack(spacing: 14) {
+                Button("Continue") { coordinator.resumeFromSavedPosition() }
+                    .focused($focus, equals: .resume)
+                    .accessibilityIdentifier("player.resume")
+                Button("Start from beginning") { coordinator.startFromBeginning() }
+                    .focused($focus, equals: .startOver)
+                    .accessibilityIdentifier("player.start-over")
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .padding(20)
+        .frame(maxWidth: 760, alignment: .leading)
+        .background(.black.opacity(0.82), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(.white.opacity(0.18), lineWidth: 1))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("player.resume-prompt")
+        .accessibilityValue("\(prompt.secondsRemaining) seconds remaining")
+    }
+
     private var timeline: some View {
         VStack(spacing: 10) {
             HStack {
@@ -345,6 +400,7 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
             PlaybackTimeline(currentTime: displayTime, bufferedTime: bufferedTime, duration: duration, isBuffering: isBuffering, isScrubbing: scrubTarget != nil)
                 .frame(height: 18)
                 .frame(maxWidth: .infinity)
+                .accessibilityElement(children: .ignore)
                 .accessibilityIdentifier("player.progress")
         }
         .padding(.horizontal, 16)
@@ -361,6 +417,7 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
         .focused($focus, equals: .timeline)
         .focusEffectDisabled()
         .onTapGesture { commitScrub() }
+        .accessibilityElement(children: .contain)
         .accessibilityAddTraits(.isButton)
         .accessibilityIdentifier("player.timeline")
         .accessibilityLabel("Playback timeline")
@@ -595,11 +652,86 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
     private var selectedAudioTitle: String { audioTracks.first(where: \.isSelected)?.title ?? "Audio" }
     private var isOffSelected: Bool { selectedExternalSubtitleID == nil && !embeddedSubtitleTracks.contains(where: \.isSelected) }
     private func isEmbeddedSubtitleSelected(_ id: String) -> Bool { selectedExternalSubtitleID == nil && embeddedSubtitleTracks.first(where: { $0.id == id })?.isSelected == true }
-    private func isExternalSubtitleSelected(_ id: String) -> Bool { selectedExternalSubtitleID == id }
+    private func isExternalSubtitleSelected(_ id: String) -> Bool {
+        selectedExternalSubtitleID == id || coordinator.subtitleSelection == .external(fileID: id)
+    }
 
-    private func togglePlayback() { isPlaying ? pause() : play(); revealChrome() }
-    private func performSeek(_ seconds: TimeInterval) { seek(PlaybackPresentation.clampedSeekTarget(seconds, duration: duration)); scrubTarget = nil; revealChrome() }
-    private func commitScrub() { guard let scrubTarget else { return }; performSeek(scrubTarget) }
+    private var shouldInterceptSelect: Bool {
+        if focus == .timeline && scrubTarget != nil { return true }
+        return !chromeVisible && presentedPanel == nil && diagnostics == nil && coordinator.resumePrompt == nil
+    }
+
+    private func togglePlayback() {
+        guard coordinator.resumePrompt == nil else { return }
+        isPlaying ? pause() : play()
+        revealChrome()
+    }
+
+    private func performSeek(_ seconds: TimeInterval) {
+        seek(PlaybackPresentation.clampedSeekTarget(seconds, duration: duration))
+        scrubTarget = nil
+        touchScrubOrigin = nil
+        revealChrome()
+    }
+
+    private func commitScrub() {
+        guard let scrubTarget else { return }
+        let target = PlaybackPresentation.clampedSeekTarget(scrubTarget, duration: duration)
+        self.scrubTarget = nil
+        touchScrubOrigin = nil
+        if isPlaying {
+            seek(target)
+        } else {
+            seekAndPlay(target)
+        }
+        revealChrome()
+    }
+
+    private func handleTouchPanChanged(_ translation: CGPoint) {
+        guard presentedPanel == nil, coordinator.resumePrompt == nil else { return }
+        guard max(abs(translation.x), abs(translation.y)) >= 24 else { return }
+        guard abs(translation.x) > abs(translation.y), isSeekable else { return }
+        guard !isPlaying else { return }
+        if touchScrubOrigin == nil {
+            touchScrubOrigin = currentTime
+            scrubTarget = nil
+        }
+        guard let origin = touchScrubOrigin else { return }
+        scrubTarget = PlaybackPresentation.scrubTarget(
+            currentTime: origin,
+            horizontalTranslation: Double(translation.x),
+            duration: duration
+        )
+        focus = .timeline
+        revealChrome()
+    }
+
+    private func handleTouchPanEnded(_ translation: CGPoint) {
+        defer { touchScrubOrigin = nil }
+        guard presentedPanel == nil, coordinator.resumePrompt == nil else { return }
+        guard max(abs(translation.x), abs(translation.y)) >= 24 else { return }
+        if scrubTarget != nil {
+            focus = .timeline
+            revealChrome()
+            return
+        }
+        let direction: MoveCommandDirection
+        if abs(translation.x) > abs(translation.y) {
+            direction = translation.x > 0 ? .right : .left
+        } else {
+            direction = translation.y > 0 ? .down : .up
+        }
+        handleMove(direction)
+    }
+
+    private func handleSelectCommand() {
+        if focus == .timeline, scrubTarget != nil {
+            commitScrub()
+        } else if !chromeVisible && presentedPanel == nil && diagnostics == nil && coordinator.resumePrompt == nil {
+            togglePlayback()
+        }
+    }
+
     private func openPanel(_ panel: PresentedPanel) { presentedPanel = panel; hideChromeTask?.cancel(); chromeVisible = true; focus = .panel }
     private func dismissAppearance() {
         presentedPanel = .subtitles
@@ -765,16 +897,39 @@ private struct PlaybackDiagnosticsPanel: View {
 private struct MenuKeyCommandCapture: UIViewControllerRepresentable {
     let onMenu: () -> Void
     let onDirectional: () -> Void
+    let onSelect: () -> Void
+    let onPlayPause: () -> Void
+    let onPanChanged: (CGPoint) -> Void
+    let onPanEnded: (CGPoint) -> Void
     let interceptsDirectional: Bool
+    let interceptsSelect: Bool
+    let interceptsPlayPause: Bool
 
     func makeUIViewController(context: Context) -> MenuKeyCommandController {
-        MenuKeyCommandController(onMenu: onMenu, onDirectional: onDirectional, interceptsDirectional: interceptsDirectional)
+        MenuKeyCommandController(
+            onMenu: onMenu,
+            onDirectional: onDirectional,
+            onSelect: onSelect,
+            onPlayPause: onPlayPause,
+            onPanChanged: onPanChanged,
+            onPanEnded: onPanEnded,
+            interceptsDirectional: interceptsDirectional,
+            interceptsSelect: interceptsSelect,
+            interceptsPlayPause: interceptsPlayPause
+        )
     }
 
     func updateUIViewController(_ controller: MenuKeyCommandController, context: Context) {
         controller.onMenu = onMenu
         controller.onDirectional = onDirectional
+        controller.onSelect = onSelect
+        controller.onPlayPause = onPlayPause
+        controller.onPanChanged = onPanChanged
+        controller.onPanEnded = onPanEnded
         controller.interceptsDirectional = interceptsDirectional
+        controller.interceptsSelect = interceptsSelect
+        controller.interceptsPlayPause = interceptsPlayPause
+        controller.installPanGestureRecognizer()
         controller.claimFirstResponder()
     }
 }
@@ -782,12 +937,25 @@ private struct MenuKeyCommandCapture: UIViewControllerRepresentable {
 private final class MenuKeyCommandController: UIViewController {
     var onMenu: () -> Void
     var onDirectional: () -> Void
+    var onSelect: () -> Void
+    var onPlayPause: () -> Void
+    var onPanChanged: (CGPoint) -> Void
+    var onPanEnded: (CGPoint) -> Void
     var interceptsDirectional: Bool
+    var interceptsSelect: Bool
+    var interceptsPlayPause: Bool
+    private var panGestureRecognizer: UIPanGestureRecognizer?
 
-    init(onMenu: @escaping () -> Void, onDirectional: @escaping () -> Void, interceptsDirectional: Bool) {
+    init(onMenu: @escaping () -> Void, onDirectional: @escaping () -> Void, onSelect: @escaping () -> Void, onPlayPause: @escaping () -> Void, onPanChanged: @escaping (CGPoint) -> Void, onPanEnded: @escaping (CGPoint) -> Void, interceptsDirectional: Bool, interceptsSelect: Bool, interceptsPlayPause: Bool) {
         self.onMenu = onMenu
         self.onDirectional = onDirectional
+        self.onSelect = onSelect
+        self.onPlayPause = onPlayPause
+        self.onPanChanged = onPanChanged
+        self.onPanEnded = onPanEnded
         self.interceptsDirectional = interceptsDirectional
+        self.interceptsSelect = interceptsSelect
+        self.interceptsPlayPause = interceptsPlayPause
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -798,12 +966,52 @@ private final class MenuKeyCommandController: UIViewController {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        installPanGestureRecognizer()
         claimFirstResponder()
+    }
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        removePanGestureRecognizer()
+    }
+
+    @objc private func handlePan(_ recognizer: UIPanGestureRecognizer) {
+        let translation = recognizer.translation(in: recognizer.view)
+        switch recognizer.state {
+        case .began, .changed:
+            onPanChanged(translation)
+        case .ended, .cancelled, .failed:
+            onPanEnded(translation)
+        default:
+            break
+        }
+    }
+
+    fileprivate func installPanGestureRecognizer() {
+        guard panGestureRecognizer == nil, let window = view.window else { return }
+        let recognizer = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+        recognizer.cancelsTouchesInView = false
+        window.addGestureRecognizer(recognizer)
+        panGestureRecognizer = recognizer
+    }
+
+    private func removePanGestureRecognizer() {
+        guard let recognizer = panGestureRecognizer else { return }
+        recognizer.view?.removeGestureRecognizer(recognizer)
+        panGestureRecognizer = nil
     }
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         if presses.contains(where: { $0.type == .menu }) {
             onMenu()
+            return
+        }
+        if interceptsSelect, presses.contains(where: { $0.type == .select }) {
+            onSelect()
+            return
+        }
+        if interceptsPlayPause, presses.contains(where: { $0.type == .playPause }) {
+            onPlayPause()
             return
         }
         if interceptsDirectional, presses.contains(where: Self.isDirectional) {

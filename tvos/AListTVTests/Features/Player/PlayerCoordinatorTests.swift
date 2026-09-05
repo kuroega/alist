@@ -116,7 +116,7 @@ final class PlayerCoordinatorTests: XCTestCase {
         XCTAssertEqual(paths, ["/a.mp4", "/a.mp4", "/b.mp4", "/b.mp4"])
     }
 
-    func testStartsFromBeginningDespiteSavedProgress() async {
+    func testSavedProgressShowsResumePromptUntilConfirmed() async throws {
         let suite = "PlayerCoordinatorTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defaults.removePersistentDomain(forName: suite)
@@ -126,6 +126,59 @@ final class PlayerCoordinatorTests: XCTestCase {
         let api = PlayerFakeAPI(details: [detail(url: "https://media.example/video", path: "/video.mp4")])
         let player = PlayerFakeController()
         let coordinator = makeCoordinator(api: api, player: player, store: store)
+
+        await coordinator.play(object: object("/video.mp4"))
+
+        XCTAssertEqual(coordinator.resumePrompt?.position, 60)
+        XCTAssertEqual(coordinator.resumePrompt?.secondsRemaining, 5)
+        XCTAssertTrue(player.seekValues.isEmpty)
+        XCTAssertEqual(player.playCount, 0)
+
+        coordinator.resumeFromSavedPosition()
+        try await waitUntil { player.seekValues == [60] && player.playCount == 1 }
+        XCTAssertNil(coordinator.resumePrompt)
+    }
+
+    func testSavedProgressTimesOutToBeginning() async throws {
+        let suite = "PlayerCoordinatorTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let store = PlaybackProgressStore(defaults: defaults)
+        let identity = PlaybackProgressIdentity(baseURL: "https://alist.example", username: "alice", virtualPath: "/video.mp4")
+        store.update(identity: identity, position: 60, duration: 200)
+        let api = PlayerFakeAPI(details: [detail(url: "https://media.example/video", path: "/video.mp4")])
+        let player = PlayerFakeController()
+        let coordinator = makeCoordinator(api: api, player: player, store: store, resumeCountdownInterval: .milliseconds(1))
+
+        await coordinator.play(object: object("/video.mp4"))
+        try await waitUntil { coordinator.resumePrompt == nil && player.playCount == 1 }
+
+        XCTAssertTrue(player.seekValues.isEmpty)
+    }
+
+    func testLeavingPlayerCancelsResumePrompt() async throws {
+        let suite = "PlayerCoordinatorTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let store = PlaybackProgressStore(defaults: defaults)
+        let identity = PlaybackProgressIdentity(baseURL: "https://alist.example", username: "alice", virtualPath: "/video.mp4")
+        store.update(identity: identity, position: 60, duration: 200)
+        let api = PlayerFakeAPI(details: [detail(url: "https://media.example/video", path: "/video.mp4")])
+        let player = PlayerFakeController()
+        let coordinator = makeCoordinator(api: api, player: player, store: store, resumeCountdownInterval: .milliseconds(10))
+
+        await coordinator.play(object: object("/video.mp4"))
+        coordinator.playerDidDisappear()
+        try await Task.sleep(for: .milliseconds(30))
+
+        XCTAssertNil(coordinator.resumePrompt)
+        XCTAssertEqual(player.playCount, 0)
+    }
+
+    func testStartsFromBeginningWithoutSavedProgress() async {
+        let api = PlayerFakeAPI(details: [detail(url: "https://media.example/video", path: "/video.mp4")])
+        let player = PlayerFakeController()
+        let coordinator = makeCoordinator(api: api, player: player)
 
         await coordinator.play(object: object("/video.mp4"))
 
@@ -387,7 +440,8 @@ final class PlayerCoordinatorTests: XCTestCase {
         api: PlayerFakeAPI,
         player: PlayerFakeController,
         store: PlaybackProgressStore? = nil,
-        subtitleDataLoader: @escaping @Sendable (URL) async throws -> Data = { url in try nativeSubtitleData(for: url) }
+        subtitleDataLoader: @escaping @Sendable (URL) async throws -> Data = { url in try nativeSubtitleData(for: url) },
+        resumeCountdownInterval: Duration = .seconds(1)
     ) -> PlayerCoordinator {
         let progressStore: PlaybackProgressStore
         if let store {
@@ -405,7 +459,8 @@ final class PlayerCoordinatorTests: XCTestCase {
             subtitleAppearanceStore: SubtitleAppearanceStore(defaults: progressStoreDefaults()),
             baseURL: URL(string: "https://alist.example")!,
             username: "alice",
-            subtitleDataLoader: subtitleDataLoader
+            subtitleDataLoader: subtitleDataLoader,
+            resumeCountdownInterval: resumeCountdownInterval
         )
     }
 

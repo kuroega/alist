@@ -17,6 +17,26 @@ final class PlayerControllerModelTests: XCTestCase {
         XCTAssertEqual(PlaybackPresentation.clampedProgressFraction(60, duration: 0), 0)
     }
 
+    func testScrubTargetUsesHorizontalTranslationAndClamps() {
+        XCTAssertEqual(
+            PlaybackPresentation.scrubTarget(currentTime: 45, horizontalTranslation: 30, duration: 120),
+            55
+        )
+        XCTAssertEqual(
+            PlaybackPresentation.scrubTarget(currentTime: 45, horizontalTranslation: -150, duration: 120),
+            0
+        )
+        XCTAssertEqual(
+            PlaybackPresentation.scrubTarget(currentTime: 115, horizontalTranslation: 60, duration: 120),
+            120
+        )
+    }
+
+    func testResumeTimeTextIncludesHours() {
+        XCTAssertEqual(PlaybackPresentation.resumeTimeText(0), "00:00:00")
+        XCTAssertEqual(PlaybackPresentation.resumeTimeText(3_723), "01:02:03")
+    }
+
     func testTrackLabelFallsBackAndExcludesURLLikeMetadata() {
         XCTAssertEqual(
             PlaybackPresentation.trackTitle(name: nil, description: nil, language: nil, fallback: "Audio 1"),

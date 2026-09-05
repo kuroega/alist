@@ -19,6 +19,12 @@ struct ExternalSubtitleOption: Identifiable, Equatable, Sendable {
     let title: String
 }
 
+struct PlaybackResumePrompt: Equatable, Sendable {
+    let position: TimeInterval
+    let duration: TimeInterval
+    var secondsRemaining: Int
+}
+
 enum SubtitleSelection: Equatable, Sendable {
     case off
     case embedded(trackID: String)
@@ -62,6 +68,15 @@ enum PlaybackPresentation {
     static func clampedProgressFraction(_ value: TimeInterval, duration: TimeInterval) -> Double {
         guard duration > 0 else { return 0 }
         return min(max(value / duration, 0), 1)
+    }
+
+    static func scrubTarget(currentTime: TimeInterval, horizontalTranslation: Double, duration: TimeInterval, secondsPerPoint: TimeInterval = 1.0 / 3.0) -> TimeInterval {
+        clampedSeekTarget(currentTime + horizontalTranslation * secondsPerPoint, duration: duration)
+    }
+
+    static func resumeTimeText(_ seconds: TimeInterval) -> String {
+        let value = max(0, Int(seconds.rounded(.down)))
+        return String(format: "%02d:%02d:%02d", value / 3_600, (value % 3_600) / 60, value % 60)
     }
 
     static func trackTitle(name: String?, description: String?, language: String?, fallback: String) -> String {

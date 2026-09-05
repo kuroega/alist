@@ -29,6 +29,7 @@ final class PlayerCoordinator: ObservableObject {
     @Published var subtitleSelectionError: String?
     @Published private(set) var subtitleSelection: SubtitleSelection = .off
     @Published private(set) var subtitleAppearance: SubtitleAppearance
+    @Published private(set) var resumePrompt: PlaybackResumePrompt?
     let subtitleOverlay = SubtitleOverlayModel()
 
     let controller: any PlayerControlling
@@ -45,12 +46,14 @@ final class PlayerCoordinator: ObservableObject {
     private let username: String
     private let onUnauthorized: @MainActor () async -> Void
     private let subtitleDataLoader: @Sendable (URL) async throws -> Data
+    private let resumeCountdownInterval: Duration
     private var currentObject: AListObject?
     private var sessionID = UUID()
     private var refreshCount = 0
     private var subtitleAppearanceReloadID = UUID()
     private var eventTask: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
+    private var resumeTask: Task<Void, Never>?
     private var discoveryTask: Task<Void, Never>?
     private var subtitleSelectionTask: Task<Void, Never>?
 
@@ -62,7 +65,8 @@ final class PlayerCoordinator: ObservableObject {
         baseURL: URL,
         username: String,
         onUnauthorized: @escaping @MainActor () async -> Void = {},
-        subtitleDataLoader: @escaping @Sendable (URL) async throws -> Data = PlayerCoordinator.loadSubtitleData
+        subtitleDataLoader: @escaping @Sendable (URL) async throws -> Data = PlayerCoordinator.loadSubtitleData,
+        resumeCountdownInterval: Duration = .seconds(1)
     ) {
         self.api = api
         self.controller = controller
@@ -73,6 +77,7 @@ final class PlayerCoordinator: ObservableObject {
         self.username = username
         self.onUnauthorized = onUnauthorized
         self.subtitleDataLoader = subtitleDataLoader
+        self.resumeCountdownInterval = resumeCountdownInterval
         controller.setSubtitleAppearance(subtitleAppearance)
     }
 
@@ -84,6 +89,7 @@ final class PlayerCoordinator: ObservableObject {
     deinit {
         eventTask?.cancel()
         progressTask?.cancel()
+        resumeTask?.cancel()
         discoveryTask?.cancel()
         subtitleSelectionTask?.cancel()
     }
@@ -94,6 +100,9 @@ final class PlayerCoordinator: ObservableObject {
             return
         }
         finishMonitoring(saveProgress: true)
+        resumeTask?.cancel()
+        resumeTask = nil
+        resumePrompt = nil
         discoveryTask?.cancel()
         subtitleSelectionTask?.cancel()
         currentObject = object
@@ -112,10 +121,14 @@ final class PlayerCoordinator: ObservableObject {
             let url = try PlayableURLValidator.validate(detail.rawURL)
             controller.replaceCurrentItem(url: url, preservingSelections: false)
             guard sessionID == activeSession else { return }
-            controller.play()
-            state = .playing
             isPresented = true
+            state = .playing
             startMonitoring(session: activeSession)
+            if let record = resumableProgress {
+                beginResumePrompt(position: record.position, duration: record.duration, session: activeSession)
+            } else {
+                controller.play()
+            }
             discoverExternalSubtitles(session: activeSession, videoPath: path)
         } catch AListAPIError.unauthorized {
             await onUnauthorized()
@@ -130,10 +143,35 @@ final class PlayerCoordinator: ObservableObject {
         Task { await play(object: object) }
     }
 
+    func resumeFromSavedPosition() {
+        guard let prompt = resumePrompt else { return }
+        let activeSession = sessionID
+        resumeTask?.cancel()
+        resumeTask = nil
+        resumePrompt = nil
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.controller.seek(to: prompt.position)
+            guard self.sessionID == activeSession, self.isPresented else { return }
+            self.controller.play()
+        }
+    }
+
+    func startFromBeginning() {
+        guard resumePrompt != nil else { return }
+        resumeTask?.cancel()
+        resumeTask = nil
+        resumePrompt = nil
+        controller.play()
+    }
+
     func playerDidDisappear() {
         guard isPresented || state != .idle else { return }
         sessionID = UUID()
         finishMonitoring(saveProgress: true)
+        resumeTask?.cancel()
+        resumeTask = nil
+        resumePrompt = nil
         discoveryTask?.cancel()
         discoveryTask = nil
         subtitleSelectionTask?.cancel()
@@ -252,6 +290,37 @@ final class PlayerCoordinator: ObservableObject {
     func saveProgress() {
         guard let identity = progressIdentity else { return }
         progressStore.update(identity: identity, position: controller.currentTime, duration: controller.duration)
+    }
+
+    private func beginResumePrompt(position: TimeInterval, duration: TimeInterval, session: UUID) {
+        resumePrompt = PlaybackResumePrompt(position: position, duration: duration, secondsRemaining: 5)
+        resumeTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            for remaining in stride(from: 5, through: 1, by: -1) {
+                guard !Task.isCancelled, self.sessionID == session, self.resumePrompt != nil else { return }
+                self.resumePrompt?.secondsRemaining = remaining
+                do {
+                    try await Task.sleep(for: self.resumeCountdownInterval)
+                } catch {
+                    return
+                }
+            }
+            guard !Task.isCancelled, self.sessionID == session, self.resumePrompt != nil else { return }
+            self.startFromBeginning()
+        }
+    }
+
+    private var resumableProgress: PlaybackProgressRecord? {
+        guard let identity = progressIdentity,
+              let record = progressStore.record(for: identity),
+              record.position.isFinite,
+              record.duration.isFinite,
+              record.duration > 0,
+              record.position >= 30,
+              record.position < record.duration * 0.9 else {
+            return nil
+        }
+        return record
     }
 
     private func discoverExternalSubtitles(session: UUID, videoPath: String) {
