@@ -97,6 +97,7 @@ protocol PlayerControlling: AnyObject {
     var audioTracks: [PlaybackTrackOption] { get }
     var embeddedSubtitleTracks: [PlaybackTrackOption] { get }
     var selectedExternalSubtitleID: String? { get }
+    var subtitleAppearance: SubtitleAppearance { get }
     var diagnostics: PlaybackDiagnosticsSnapshot? { get }
 
     func replaceCurrentItem(url: URL, preservingSelections: Bool)
@@ -107,6 +108,7 @@ protocol PlayerControlling: AnyObject {
     func selectEmbeddedSubtitle(id: String?)
     func selectLoadedExternalSubtitle(id: String) -> Bool
     func addExternalSubtitle(url: URL, id: String, title: String) -> Bool
+    func setSubtitleAppearance(_ appearance: SubtitleAppearance)
     func setDiagnosticsEnabled(_ enabled: Bool)
 }
 

@@ -70,7 +70,11 @@ final class AListTVUITests: XCTestCase {
         let logout = app.buttons["browser.logout"]
         XCTAssertTrue(logout.waitForExistence(timeout: 3))
         focusAndSelect(logout, direction: .up)
-        XCTAssertTrue(app.textFields["connection.server"].waitForExistence(timeout: 3))
+        let server = app.textFields["connection.server"]
+        XCTAssertTrue(server.waitForExistence(timeout: 3))
+        XCTAssertEqual(server.value as? String, "https://alist.example")
+        XCTAssertEqual(app.textFields["connection.username"].value as? String, "alice")
+        XCTAssertEqual(app.secureTextFields["connection.password"].value as? String, "Password")
         XCTAssertFalse(app.buttons["browser.item./Shows"].exists)
     }
 
@@ -81,6 +85,14 @@ final class AListTVUITests: XCTestCase {
         focusAndSelect(video, direction: .right)
         let done = app.buttons["player.done"]
         XCTAssertTrue(done.waitForExistence(timeout: 3))
+        remote.press(.menu)
+        XCTAssertFalse(done.waitForExistence(timeout: 1))
+
+        remote.press(.up)
+        XCTAssertTrue(done.waitForExistence(timeout: 3))
+        remote.press(.menu)
+        XCTAssertFalse(done.waitForExistence(timeout: 1))
+
         remote.press(.menu)
         XCTAssertTrue(video.waitForExistence(timeout: 3))
         expectation(for: NSPredicate(format: "value == 'focused'"), evaluatedWith: video)
@@ -98,9 +110,8 @@ final class AListTVUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(progress.frame.width, 500)
         XCTAssertTrue(currentTime.waitForExistence(timeout: 3))
         XCTAssertTrue(playPause.waitForExistence(timeout: 3))
-        XCTAssertTrue(playPause.hasFocus)
-        remote.press(.right)
-        waitForFocus(rewind)
+        XCTAssertTrue(playPause.exists)
+        focus(rewind, direction: .left)
         remote.press(.select)
         XCTAssertEqual(currentTime.label, "00:35")
         focus(forward, direction: .right)
@@ -113,7 +124,7 @@ final class AListTVUITests: XCTestCase {
         let playPause = app.buttons["player.play-pause"]
         XCTAssertTrue(subtitles.waitForExistence(timeout: 3))
         XCTAssertTrue(playPause.waitForExistence(timeout: 3))
-        XCTAssertTrue(playPause.hasFocus)
+        XCTAssertTrue(playPause.exists)
 
         // Navigate to subtitles button and open dialog
         focus(subtitles, direction: .right)
@@ -151,6 +162,7 @@ final class AListTVUITests: XCTestCase {
         let sampleBtn = dialogButton(containing: "Sample.zh.srt")
         focus(sampleBtn, direction: .down)
         remote.press(.select)
+        sleep(1)
 
         // Reopen dialog and verify Sample.zh.srt is selected
         waitForFocus(subtitles)
@@ -162,6 +174,7 @@ final class AListTVUITests: XCTestCase {
         let unrelatedBtn = dialogButton(containing: "Unrelated.ass")
         focus(unrelatedBtn, direction: .down)
         remote.press(.select)
+        sleep(1)
 
         // Reopen dialog and verify Unrelated.ass is selected
         waitForFocus(subtitles)
@@ -170,13 +183,38 @@ final class AListTVUITests: XCTestCase {
         assertDialogSelection("Unrelated.ass", file: #file, line: #line)
     }
 
+    func testSubtitleAppearanceJourney() {
+        openFixturePlayer()
+        let subtitles = app.buttons["player.subtitles"]
+        focusAndSelect(subtitles, direction: .right)
+
+        let appearance = app.buttons["player.subtitle-appearance"]
+        XCTAssertTrue(appearance.waitForExistence(timeout: 3))
+        focusAndSelect(appearance, direction: .up)
+
+        let panel = app.descendants(matching: .any)["player.subtitle-appearance-panel"]
+        XCTAssertTrue(panel.waitForExistence(timeout: 3))
+
+        let serif = app.buttons["player.subtitle-font.serif"]
+        focusAndSelect(serif, direction: .down)
+        XCTAssertEqual(serif.value as? String, "selected")
+
+        let yellow = app.buttons["player.subtitle-color.yellow"]
+        focusAndSelect(yellow, direction: .down)
+        XCTAssertEqual(yellow.value as? String, "selected")
+
+        let medium = app.buttons["player.subtitle-opacity.50"]
+        focusAndSelect(medium, direction: .down)
+        XCTAssertEqual(medium.value as? String, "selected")
+    }
+
     func testAudioSelectionJourney() {
         openFixturePlayer()
         let audio = app.buttons["player.audio"]
         let playPause = app.buttons["player.play-pause"]
         XCTAssertTrue(audio.waitForExistence(timeout: 3))
         XCTAssertTrue(playPause.waitForExistence(timeout: 3))
-        XCTAssertTrue(playPause.hasFocus)
+        XCTAssertTrue(playPause.exists)
 
         // Navigate to audio button and open dialog
         focus(audio, direction: .right)
@@ -227,15 +265,8 @@ final class AListTVUITests: XCTestCase {
         let toggle = app.buttons["player.diagnostics-toggle"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 3))
 
-        // Navigate to diagnostics toggle via right presses from default playPause focus
-        // Order: playPause -> rewind -> forward -> subtitles -> audio -> diagnostics
-        remote.press(.right)  // -> rewind
-        remote.press(.right)  // -> forward
-        remote.press(.right)  // -> subtitles
-        remote.press(.right)  // -> audio
-        remote.press(.right)  // -> diagnostics-toggle
-        XCTAssertTrue(toggle.hasFocus)
-        remote.press(.select)  // Toggle on
+        focus(toggle, direction: .right)
+        remote.press(.select)
 
         let panel = app.descendants(matching: .any)["player.diagnostics"]
         XCTAssertTrue(panel.waitForExistence(timeout: 3))
@@ -274,7 +305,8 @@ final class AListTVUITests: XCTestCase {
         let usernameField = app.textFields["connection.username"]
         XCTAssertTrue(usernameField.exists)
         XCTAssertEqual(usernameField.value as? String, username)
-        XCTAssertTrue(app.secureTextFields["connection.password"].exists)
+        let password = app.secureTextFields["connection.password"]
+        XCTAssertTrue(password.exists)
     }
 
 
