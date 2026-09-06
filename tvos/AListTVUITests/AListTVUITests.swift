@@ -16,6 +16,9 @@ final class AListTVUITests: XCTestCase {
             "ui-password=password",
             "ui-otp=123456"
         ])
+        if name.localizedCaseInsensitiveContains("autoplay") {
+            app.launchArguments.append("ui-testing-autoplay")
+        }
         app.launch()
     }
 
@@ -97,6 +100,45 @@ final class AListTVUITests: XCTestCase {
         XCTAssertTrue(video.waitForExistence(timeout: 3))
         expectation(for: NSPredicate(format: "value == 'focused'"), evaluatedWith: video)
         waitForExpectations(timeout: 3)
+    }
+
+    func testAutoplayNextMediaCanBeDisabled() {
+        login(username: "alice")
+        let video = app.buttons["browser.item./Next.mp3"]
+        XCTAssertTrue(video.waitForExistence(timeout: 3))
+        focusAndSelect(video, direction: .right)
+
+        let toggle = app.buttons["player.autoplay-toggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 3))
+        if toggle.value as? String == "Off" {
+            focusAndSelect(toggle, direction: .right)
+            XCTAssertEqual(toggle.value as? String, "On")
+        }
+        focusAndSelect(toggle, direction: .right)
+        XCTAssertTrue((toggle.value as? String)?.hasPrefix("Off") == true)
+        XCTAssertTrue((toggle.value as? String)?.contains("OFF") == true)
+        let feedbackHidden = expectation(for: NSPredicate(format: "value == 'Off'"), evaluatedWith: toggle)
+        wait(for: [feedbackHidden], timeout: 1.5)
+
+        let title = app.staticTexts["player.now-playing-title"]
+        XCTAssertEqual(title.label, "Next.mp3")
+
+        remote.press(.select)
+        XCTAssertTrue((toggle.value as? String)?.hasPrefix("On") == true)
+        XCTAssertTrue((toggle.value as? String)?.contains("ON") == true)
+
+        Thread.sleep(forTimeInterval: 1.5)
+    }
+
+    func testAutoplayNextMediaAdvancesInTheSamePlayer() {
+        login(username: "alice")
+        let video = app.buttons["browser.item./Next.mp3"]
+        XCTAssertTrue(video.waitForExistence(timeout: 3))
+        focusAndSelect(video, direction: .right)
+
+        let nextTitle = app.staticTexts["Sample.mp4"]
+        XCTAssertTrue(nextTitle.waitForExistence(timeout: 7))
+        XCTAssertTrue(app.buttons["player.done"].exists)
     }
 
     func testVisibleSeekButtonsMoveExactlyTenSeconds() {

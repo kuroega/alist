@@ -30,6 +30,13 @@ final class PlayerCoordinator: ObservableObject {
     @Published private(set) var subtitleSelection: SubtitleSelection = .off
     @Published private(set) var subtitleAppearance: SubtitleAppearance
     @Published private(set) var resumePrompt: PlaybackResumePrompt?
+    @Published var isAutoPlayEnabled: Bool {
+        didSet {
+            guard isAutoPlayEnabled != oldValue else { return }
+            playbackSettingsStore.saveAutoPlayNext(isAutoPlayEnabled)
+        }
+    }
+    @Published private(set) var autoPlayFeedback: String?
     let subtitleOverlay = SubtitleOverlayModel()
 
     let controller: any PlayerControlling
@@ -42,6 +49,7 @@ final class PlayerCoordinator: ObservableObject {
     private let api: any AListAPI
     private let progressStore: PlaybackProgressStore
     private let subtitleAppearanceStore: SubtitleAppearanceStore
+    private let playbackSettingsStore: PlaybackSettingsStore
     private let baseURL: URL
     private let username: String
     private let onUnauthorized: @MainActor () async -> Void
@@ -54,6 +62,9 @@ final class PlayerCoordinator: ObservableObject {
     private var eventTask: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
     private var resumeTask: Task<Void, Never>?
+    private var autoPlayTask: Task<Void, Never>?
+    private var autoPlayFeedbackTask: Task<Void, Never>?
+    private var autoPlayGeneration = UUID()
     private var discoveryTask: Task<Void, Never>?
     private var subtitleSelectionTask: Task<Void, Never>?
 
@@ -62,6 +73,7 @@ final class PlayerCoordinator: ObservableObject {
         controller: any PlayerControlling,
         progressStore: PlaybackProgressStore,
         subtitleAppearanceStore: SubtitleAppearanceStore = SubtitleAppearanceStore(),
+        playbackSettingsStore: PlaybackSettingsStore = PlaybackSettingsStore(),
         baseURL: URL,
         username: String,
         onUnauthorized: @escaping @MainActor () async -> Void = {},
@@ -72,6 +84,8 @@ final class PlayerCoordinator: ObservableObject {
         self.controller = controller
         self.progressStore = progressStore
         self.subtitleAppearanceStore = subtitleAppearanceStore
+        self.playbackSettingsStore = playbackSettingsStore
+        isAutoPlayEnabled = playbackSettingsStore.loadAutoPlayNext()
         subtitleAppearance = subtitleAppearanceStore.load()
         self.baseURL = baseURL
         self.username = username
@@ -90,14 +104,25 @@ final class PlayerCoordinator: ObservableObject {
         eventTask?.cancel()
         progressTask?.cancel()
         resumeTask?.cancel()
+        autoPlayTask?.cancel()
+        autoPlayFeedbackTask?.cancel()
         discoveryTask?.cancel()
         subtitleSelectionTask?.cancel()
     }
 
     func play(object: AListObject) async {
+        await play(object: object, isAutomaticTransition: false)
+    }
+
+    private func play(object: AListObject, isAutomaticTransition: Bool) async {
         guard !object.isDirectory, let path = object.virtualPath, !path.isEmpty else {
             state = .failed(message: "Folders cannot be played.")
             return
+        }
+        if !isAutomaticTransition {
+            autoPlayTask?.cancel()
+            autoPlayTask = nil
+            autoPlayGeneration = UUID()
         }
         finishMonitoring(saveProgress: true)
         resumeTask?.cancel()
@@ -138,6 +163,17 @@ final class PlayerCoordinator: ObservableObject {
         }
     }
 
+    func toggleAutoPlay() {
+        isAutoPlayEnabled.toggle()
+        autoPlayFeedbackTask?.cancel()
+        autoPlayFeedback = isAutoPlayEnabled ? "ON" : "OFF"
+        autoPlayFeedbackTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            self?.autoPlayFeedback = nil
+        }
+    }
+
     func retryPlayback() {
         guard let object = currentObject else { return }
         Task { await play(object: object) }
@@ -171,6 +207,12 @@ final class PlayerCoordinator: ObservableObject {
         finishMonitoring(saveProgress: true)
         resumeTask?.cancel()
         resumeTask = nil
+        autoPlayTask?.cancel()
+        autoPlayTask = nil
+        autoPlayFeedbackTask?.cancel()
+        autoPlayFeedbackTask = nil
+        autoPlayFeedback = nil
+        autoPlayGeneration = UUID()
         resumePrompt = nil
         discoveryTask?.cancel()
         discoveryTask = nil
@@ -369,9 +411,15 @@ final class PlayerCoordinator: ObservableObject {
                 for await event in events {
                     guard !Task.isCancelled, let self else { return }
                     guard self.currentObject != nil else { continue }
+                    let session = self.sessionID
                     switch event {
-                    case let .failed(message): await self.handleFailure(message, session: self.sessionID)
-                    case .paused: self.saveProgress()
+                    case let .failed(message): await self.handleFailure(message, session: session)
+                    case .paused:
+                        guard self.sessionID == session else { continue }
+                        self.saveProgress()
+                    case .ended:
+                        guard self.sessionID == session, self.isPresented, self.state == .playing else { continue }
+                        self.beginAutoPlay(session: session)
                     }
                 }
             }
@@ -385,6 +433,81 @@ final class PlayerCoordinator: ObservableObject {
             }
         }
     }
+
+    private func beginAutoPlay(session: UUID) {
+        guard autoPlayTask == nil else { return }
+        let generation = UUID()
+        autoPlayGeneration = generation
+        autoPlayTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.advanceToNextMedia(session: session)
+            guard self.autoPlayGeneration == generation else { return }
+            self.autoPlayTask = nil
+        }
+    }
+
+    private func advanceToNextMedia(session: UUID) async {
+        guard isAutoPlayEnabled, sessionID == session, isPresented, let currentObject else { return }
+        do {
+            guard let next = try await nextMedia(after: currentObject),
+                  !Task.isCancelled,
+                  isAutoPlayEnabled,
+                  sessionID == session,
+                  isPresented else { return }
+            await play(object: next, isAutomaticTransition: true)
+        } catch AListAPIError.unauthorized {
+            guard !Task.isCancelled, sessionID == session else { return }
+            await onUnauthorized()
+        } catch {
+            // An unavailable queue must not turn a completed item into a playback failure.
+        }
+    }
+
+    private func nextMedia(after object: AListObject) async throws -> AListObject? {
+        guard let currentPath = object.virtualPath, !currentPath.isEmpty else { return nil }
+        let parent = AListPath.parent(of: currentPath)
+        var pageNumber = 1
+        var seenPaths = Set<String>()
+        var siblings: [AListObject] = []
+
+        while !Task.isCancelled {
+            let page = try await api.list(path: parent, page: pageNumber, perPage: 200)
+            for sibling in page.content {
+                guard let path = normalizedPath(for: sibling, parent: parent), seenPaths.insert(path).inserted else { continue }
+                siblings.append(sibling.withVirtualPath(path))
+            }
+            let hasMore = page.hasMore ?? (page.content.count == 200)
+            guard hasMore else { break }
+            pageNumber += 1
+        }
+
+        let media = siblings.filter(Self.isPlayableMedia).sorted(by: Self.mediaComesBefore)
+        guard let currentIndex = media.firstIndex(where: { $0.virtualPath == AListPath.normalize(currentPath) }) else { return nil }
+        let nextIndex = media.index(after: currentIndex)
+        return nextIndex < media.endIndex ? media[nextIndex] : nil
+    }
+
+    private static func mediaComesBefore(_ lhs: AListObject, _ rhs: AListObject) -> Bool {
+        let nameOrder = lhs.name.localizedStandardCompare(rhs.name)
+        guard nameOrder == .orderedSame else { return nameOrder == .orderedAscending }
+        return (lhs.virtualPath ?? lhs.name).localizedStandardCompare(rhs.virtualPath ?? rhs.name) == .orderedAscending
+    }
+
+    private static func isPlayableMedia(_ object: AListObject) -> Bool {
+        guard !object.isDirectory else { return false }
+        switch object.fileType {
+        case .video, .audio:
+            return true
+        case .unknown:
+            let extensionName = URL(fileURLWithPath: object.name).pathExtension.lowercased()
+            return videoExtensions.contains(extensionName) || audioExtensions.contains(extensionName)
+        default:
+            return false
+        }
+    }
+
+    private static let videoExtensions: Set<String> = ["mp4", "mkv", "avi", "mov", "rmvb", "webm", "flv", "m3u8", "m4v", "ts"]
+    private static let audioExtensions: Set<String> = ["mp3", "flac", "ogg", "m4a", "wav", "opus", "wma", "aac"]
 
     private func handleFailure(_ message: String, session: UUID) async {
         guard sessionID == session, let path = currentObject?.virtualPath else { return }

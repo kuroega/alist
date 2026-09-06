@@ -30,6 +30,10 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
     private var preferredEmbeddedSubtitleTrackID: String?
     private var diagnosticsEnabled = false
     private var nextDiagnosticsUpdateTime: TimeInterval = 0
+    private var hasStartedPlayback = false
+    private var hasReachedEnd = false
+    private var hasEmittedEnded = false
+    private var lastObservedTime: TimeInterval = 0
 #if DEBUG
     private var nextStatisticsLogTime: TimeInterval = 0
 #endif
@@ -53,6 +57,10 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
         isSeekable = false
         isBuffering = false
         bufferedTime = 0
+        hasStartedPlayback = false
+        hasReachedEnd = false
+        hasEmittedEnded = false
+        lastObservedTime = 0
         pendingSeekSeconds = nil
         pendingExternalSubtitle = nil
         externalTrackIDs = [:]
@@ -91,6 +99,8 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
             return
         }
         mediaPlayer.time = VLCTime(int: Int32((target * 1_000).rounded()))
+        hasReachedEnd = false
+        lastObservedTime = target
         currentTime = target
     }
 
@@ -162,6 +172,16 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
         Task { @MainActor [weak self] in self?.handleBufferingChange(progress) }
     }
 
+    nonisolated func mediaPlayerLengthChanged(_ length: Int64) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.duration = max(0, TimeInterval(length) / 1_000)
+            if self.hasStartedPlayback && PlaybackPresentation.isNearEnd(currentTime: self.currentTime, duration: self.duration) {
+                self.hasReachedEnd = true
+            }
+        }
+    }
+
 
     nonisolated func mediaPlayerTrackAdded(_ trackID: String, with trackType: VLCMedia.TrackType) {
         Task { @MainActor [weak self] in self?.refreshTracks() }
@@ -182,6 +202,7 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
     private func handleStateChange(_ state: VLCMediaPlayerState) {
         switch state {
         case .playing:
+            hasStartedPlayback = true
             isPlaying = true
             isSeekable = mediaPlayer.isSeekable
             refreshTracks()
@@ -191,9 +212,18 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
             isBuffering = false
             continuation.yield(.paused)
         case .stopped, .stopping, .nothingSpecial:
+            let previouslyObservedTime = lastObservedTime
+            refreshTiming(force: true)
+            let stoppedTime = max(currentTime, previouslyObservedTime, TimeInterval(mediaPlayer.time.intValue) / 1_000)
+            let stoppedDuration = max(duration, TimeInterval(mediaPlayer.media?.length.intValue ?? 0) / 1_000)
+            let didReachEnd = hasStartedPlayback && (hasReachedEnd || PlaybackPresentation.isNearEnd(currentTime: stoppedTime, duration: stoppedDuration))
             isPlaying = false
             isBuffering = false
             bufferedTime = 0
+            if didReachEnd && !hasEmittedEnded {
+                hasEmittedEnded = true
+                continuation.yield(.ended)
+            }
         case .opening:
             break
         case .error:
@@ -228,14 +258,18 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
         refreshTracks()
     }
 
-    private func refreshTiming() {
+    private func refreshTiming(force: Bool = false) {
         let milliseconds = mediaPlayer.time.intValue
         let lengthMilliseconds = mediaPlayer.media?.length.intValue ?? 0
-        if !isBuffering {
+        if !isBuffering || force {
             currentTime = max(0, TimeInterval(milliseconds) / 1_000)
+            lastObservedTime = currentTime
         }
         duration = max(0, TimeInterval(lengthMilliseconds) / 1_000)
         isSeekable = mediaPlayer.isSeekable
+        if hasStartedPlayback && PlaybackPresentation.isNearEnd(currentTime: currentTime, duration: duration) {
+            hasReachedEnd = true
+        }
         if isSeekable { applyPendingSeekIfPossible() }
         refreshDiagnostics()
 #if DEBUG
@@ -315,6 +349,8 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
         self.pendingSeekSeconds = nil
         let target = duration > 0 ? min(pendingSeekSeconds, duration) : pendingSeekSeconds
         mediaPlayer.time = VLCTime(int: Int32((target * 1_000).rounded()))
+        hasReachedEnd = false
+        lastObservedTime = target
         currentTime = target
     }
 

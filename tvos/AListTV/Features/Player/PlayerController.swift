@@ -3,6 +3,26 @@ import Foundation
 enum PlayerEvent: Equatable, Sendable {
     case failed(message: String)
     case paused
+    case ended
+}
+
+struct PlaybackSettingsStore {
+    static let autoPlayNextKey = "com.alist.tv.playback-auto-next-v1"
+
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    func loadAutoPlayNext() -> Bool {
+        guard defaults.object(forKey: Self.autoPlayNextKey) != nil else { return true }
+        return defaults.bool(forKey: Self.autoPlayNextKey)
+    }
+
+    func saveAutoPlayNext(_ enabled: Bool) {
+        defaults.set(enabled, forKey: Self.autoPlayNextKey)
+    }
 }
 
 struct PlaybackTrackOption: Identifiable, Equatable, Sendable {
@@ -68,6 +88,12 @@ enum PlaybackPresentation {
     static func clampedProgressFraction(_ value: TimeInterval, duration: TimeInterval) -> Double {
         guard duration > 0 else { return 0 }
         return min(max(value / duration, 0), 1)
+    }
+
+    static func isNearEnd(currentTime: TimeInterval, duration: TimeInterval) -> Bool {
+        guard currentTime.isFinite, duration.isFinite, duration > 0 else { return false }
+        let tolerance = max(0.5, min(2, duration * 0.02))
+        return currentTime >= duration - tolerance
     }
 
     static func scrubTarget(currentTime: TimeInterval, horizontalTranslation: Double, duration: TimeInterval, secondsPerPoint: TimeInterval = 1.0 / 3.0) -> TimeInterval {

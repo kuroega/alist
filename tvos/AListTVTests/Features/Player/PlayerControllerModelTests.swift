@@ -17,6 +17,24 @@ final class PlayerControllerModelTests: XCTestCase {
         XCTAssertEqual(PlaybackPresentation.clampedProgressFraction(60, duration: 0), 0)
     }
 
+    func testNearEndRequiresKnownDurationAndAllowsSmallTimingDrift() {
+        XCTAssertFalse(PlaybackPresentation.isNearEnd(currentTime: 117.9, duration: 120))
+        XCTAssertTrue(PlaybackPresentation.isNearEnd(currentTime: 118, duration: 120))
+        XCTAssertTrue(PlaybackPresentation.isNearEnd(currentTime: 9.5, duration: 10))
+        XCTAssertFalse(PlaybackPresentation.isNearEnd(currentTime: 1, duration: 0))
+    }
+
+    func testPlaybackSettingsStoreDefaultsToEnabledAndPersistsChanges() {
+        let suite = "PlayerControllerModelTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = PlaybackSettingsStore(defaults: defaults)
+
+        XCTAssertTrue(store.loadAutoPlayNext())
+        store.saveAutoPlayNext(false)
+        XCTAssertFalse(store.loadAutoPlayNext())
+    }
+
     func testScrubTargetUsesHorizontalTranslationAndClamps() {
         XCTAssertEqual(
             PlaybackPresentation.scrubTarget(currentTime: 45, horizontalTranslation: 30, duration: 120),

@@ -20,6 +20,7 @@ final class AppContainer: ObservableObject {
     private let subtitleDataLoader: @Sendable (URL) async throws -> Data
     private let subtitleAppearanceStore: SubtitleAppearanceStore
     private let playbackProgressStore: PlaybackProgressStore
+    private let playbackSettingsStore: PlaybackSettingsStore
     private var didAttemptRestore = false
 
     init(arguments: [String] = ProcessInfo.processInfo.arguments) {
@@ -30,6 +31,7 @@ final class AppContainer: ObservableObject {
         let controllerFactory: @MainActor () -> any PlayerControlling
         let subtitleDataLoader: @Sendable (URL) async throws -> Data
         let playbackProgressStore: PlaybackProgressStore
+        let playbackSettingsStore: PlaybackSettingsStore
 
 #if DEBUG
         if arguments.contains("ui-testing") {
@@ -41,8 +43,9 @@ final class AppContainer: ObservableObject {
             preferences = ConnectionPreferences(defaults: defaults)
             subtitleAppearanceStore = SubtitleAppearanceStore(defaults: defaults)
             playbackProgressStore = PlaybackProgressStore(defaults: defaults)
+            playbackSettingsStore = PlaybackSettingsStore(defaults: defaults)
             clientFactory = { _, _ in fixtureAPI }
-            controllerFactory = { FixturePlayerController() }
+            controllerFactory = { FixturePlayerController(autoCompletesPlayback: arguments.contains("ui-testing-autoplay")) }
             subtitleDataLoader = FixtureSubtitleDataLoader.load
         } else {
             let sessionStore = SessionCredentialStore(backing: KeychainCredentialStore())
@@ -50,6 +53,7 @@ final class AppContainer: ObservableObject {
             preferences = ConnectionPreferences()
             subtitleAppearanceStore = SubtitleAppearanceStore()
             playbackProgressStore = PlaybackProgressStore()
+            playbackSettingsStore = PlaybackSettingsStore()
             clientFactory = { baseURL, clientID in
                 AListClient(
                     baseURL: baseURL,
@@ -66,6 +70,7 @@ final class AppContainer: ObservableObject {
         preferences = ConnectionPreferences()
         subtitleAppearanceStore = SubtitleAppearanceStore()
         playbackProgressStore = PlaybackProgressStore()
+        playbackSettingsStore = PlaybackSettingsStore()
         clientFactory = { baseURL, clientID in
             AListClient(
                 baseURL: baseURL,
@@ -81,6 +86,7 @@ final class AppContainer: ObservableObject {
         self.subtitleDataLoader = subtitleDataLoader
         self.subtitleAppearanceStore = subtitleAppearanceStore
         self.playbackProgressStore = playbackProgressStore
+        self.playbackSettingsStore = playbackSettingsStore
         connectionViewModel = ConnectionViewModel(
             preferences: preferences,
             credentialStore: credentialStore,
@@ -135,6 +141,7 @@ final class AppContainer: ObservableObject {
             controller: controllerFactory(),
             progressStore: playbackProgressStore,
             subtitleAppearanceStore: subtitleAppearanceStore,
+            playbackSettingsStore: playbackSettingsStore,
             baseURL: connection.baseURL,
             username: connection.username,
             onUnauthorized: { [weak self] in self?.handleUnauthorized() },

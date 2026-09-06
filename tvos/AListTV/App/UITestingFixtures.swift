@@ -22,6 +22,7 @@ actor FixtureAListAPI: AListAPI {
             content = [
                 AListObject(virtualPath: "/Shows", name: "Shows", isDirectory: true, type: 1),
                 AListObject(virtualPath: "/Sample.mp4", name: "Sample.mp4", size: 12_000_000, isDirectory: false, type: AListFileType.video.rawValue),
+                AListObject(virtualPath: "/Next.mp3", name: "Next.mp3", size: 8_000_000, isDirectory: false, type: AListFileType.audio.rawValue),
                 AListObject(virtualPath: "/Sample.zh.srt", name: "Sample.zh.srt", size: 1_000, isDirectory: false),
                 AListObject(virtualPath: "/Unrelated.ass", name: "Unrelated.ass", size: 1_000, isDirectory: false)
             ]
@@ -89,10 +90,34 @@ final class FixturePlayerController: ObservableObject, PlayerControlling {
     @Published private(set) var diagnostics: PlaybackDiagnosticsSnapshot?
     private var loadedExternalIDs = Set<String>()
     var shouldFailExternalSubtitleAdd = false
+    private let autoCompletesPlayback: Bool
+    private var autoCompleteTask: Task<Void, Never>?
 
-    init() { var captured: AsyncStream<PlayerEvent>.Continuation!; events = AsyncStream { captured = $0 }; continuation = captured }
-    func replaceCurrentItem(url: URL, preservingSelections: Bool) { currentTime = 45; if !preservingSelections { selectedExternalSubtitleID = nil } }
-    func play() { isPlaying = true }
+    init(autoCompletesPlayback: Bool = false) {
+        self.autoCompletesPlayback = autoCompletesPlayback
+        var captured: AsyncStream<PlayerEvent>.Continuation!
+        events = AsyncStream { captured = $0 }
+        continuation = captured
+    }
+    func replaceCurrentItem(url: URL, preservingSelections: Bool) {
+        autoCompleteTask?.cancel()
+        autoCompleteTask = nil
+        currentTime = 45
+        isPlaying = false
+        if !preservingSelections { selectedExternalSubtitleID = nil }
+    }
+    func play() {
+        isPlaying = true
+        guard autoCompletesPlayback else { return }
+        autoCompleteTask?.cancel()
+        autoCompleteTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled, let self, self.isPlaying else { return }
+            self.currentTime = self.duration
+            self.isPlaying = false
+            self.continuation.yield(.ended)
+        }
+    }
     func pause() { isPlaying = false; continuation.yield(.paused) }
     func seek(to seconds: TimeInterval) async { currentTime = duration > 0 ? min(max(0, seconds), duration) : max(0, seconds) }
     func selectAudioTrack(id: String) { audioTracks = audioTracks.map { PlaybackTrackOption(id: $0.id, title: $0.title, languageCode: $0.languageCode, codec: $0.codec, isSelected: $0.id == id) } }
@@ -103,6 +128,9 @@ final class FixturePlayerController: ObservableObject, PlayerControlling {
     func setDiagnosticsEnabled(_ enabled: Bool) {
         diagnostics = enabled ? PlaybackDiagnosticsSnapshot(currentTime: currentTime, duration: duration, isPlaying: isPlaying, isSeekable: isSeekable, inputBytesRead: 1_024_000, inputBitrate: 125_000, demuxBytesRead: 1_000_000, demuxBitrate: 120_000, demuxCorrupted: 0, demuxDiscontinuity: 0, decodedVideo: 300, decodedAudio: 500, displayedPictures: 298, latePictures: 1, lostPictures: 1, playedAudioBuffers: 500, lostAudioBuffers: 0, videoResolution: "1920×1080", videoFrameRate: 24, videoCodec: "H.264", audioTitle: "English", audioLanguageCode: "en", audioCodec: "AAC", subtitleTitle: "English", subtitleLanguageCode: "en", subtitleCodec: "WebVTT") : nil
     }
-    deinit { continuation.finish() }
+    deinit {
+        autoCompleteTask?.cancel()
+        continuation.finish()
+    }
 }
 #endif

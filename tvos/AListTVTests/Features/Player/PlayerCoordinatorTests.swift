@@ -57,6 +57,148 @@ final class PlayerCoordinatorTests: XCTestCase {
         XCTAssertEqual(paths, [])
     }
 
+    func testEndedAutomaticallyPlaysNextMediaInFilenameOrder() async throws {
+        let api = PlayerFakeAPI(
+            details: [
+                detail(url: "https://media.example/episode-1", path: "/Episode 1.mp4"),
+                detail(url: "https://media.example/episode-2", path: "/Episode 2.mp3")
+            ],
+            repeatingListByPath: ["/": [
+                [
+                    object("/Episode 1.mp4", type: AListFileType.video.rawValue),
+                    object("/Episode 1.srt"),
+                    AListObject(virtualPath: "/Folder", name: "Folder", isDirectory: true)
+                ],
+                [
+                    object("/Episode 10.mp4", type: AListFileType.video.rawValue),
+                    object("/Episode 2.mp3", type: AListFileType.audio.rawValue)
+                ]
+            ]]
+        )
+        let player = PlayerFakeController()
+        let coordinator = makeCoordinator(api: api, player: player)
+
+        await coordinator.play(object: object("/Episode 1.mp4", type: AListFileType.video.rawValue))
+        try await waitUntil { coordinator.externalSubtitleDiscoveryState == .loaded }
+        player.emit(.ended)
+        player.emit(.ended)
+        try await waitUntil { player.replacedURLs.count == 2 }
+
+        let paths = await api.getPaths
+        XCTAssertEqual(paths, ["/Episode 1.mp4", "/Episode 2.mp3"])
+        XCTAssertEqual(coordinator.nowPlayingPath, "/Episode 2.mp3")
+        XCTAssertEqual(player.playCount, 2)
+    }
+
+    func testAutoPlayRestartsEventMonitoringForNextMedia() async throws {
+        let api = PlayerFakeAPI(
+            details: [
+                detail(url: "https://media.example/episode-1", path: "/Episode 1.mp4"),
+                detail(url: "https://media.example/episode-2", path: "/Episode 2.mp4"),
+                detail(url: "https://media.example/episode-3", path: "/Episode 3.mp4")
+            ],
+            repeatingListByPath: ["/": [[
+                object("/Episode 1.mp4", type: AListFileType.video.rawValue),
+                object("/Episode 2.mp4", type: AListFileType.video.rawValue),
+                object("/Episode 3.mp4", type: AListFileType.video.rawValue)
+            ]]]
+        )
+        let player = PlayerFakeController()
+        let coordinator = makeCoordinator(api: api, player: player)
+
+        await coordinator.play(object: object("/Episode 1.mp4", type: AListFileType.video.rawValue))
+        player.emit(.ended)
+        try await waitUntil { player.replacedURLs.count == 2 }
+        player.emit(.ended)
+        try await waitUntil { player.replacedURLs.count == 3 }
+
+        XCTAssertEqual(coordinator.nowPlayingPath, "/Episode 3.mp4")
+        XCTAssertEqual(player.playCount, 3)
+    }
+
+    func testAutoPlayCanBeDisabled() async throws {
+        let api = PlayerFakeAPI(
+            details: [
+                detail(url: "https://media.example/episode-1", path: "/Episode 1.mp4"),
+                detail(url: "https://media.example/episode-2", path: "/Episode 2.mp4")
+            ],
+            repeatingListByPath: ["/": [[
+                object("/Episode 1.mp4", type: AListFileType.video.rawValue),
+                object("/Episode 2.mp4", type: AListFileType.video.rawValue)
+            ]]]
+        )
+        let player = PlayerFakeController()
+        let coordinator = makeCoordinator(api: api, player: player)
+        coordinator.isAutoPlayEnabled = false
+
+        await coordinator.play(object: object("/Episode 1.mp4", type: AListFileType.video.rawValue))
+        try await waitUntil { coordinator.externalSubtitleDiscoveryState == .loaded }
+        player.emit(.ended)
+        try await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertEqual(player.replacedURLs.count, 1)
+        XCTAssertEqual(coordinator.nowPlayingPath, "/Episode 1.mp4")
+    }
+
+    func testAutoPlayTogglePublishesFeedbackAndClears() async throws {
+        let coordinator = makeCoordinator(
+            api: PlayerFakeAPI(details: []),
+            player: PlayerFakeController()
+        )
+
+        XCTAssertTrue(coordinator.isAutoPlayEnabled)
+        coordinator.toggleAutoPlay()
+        XCTAssertFalse(coordinator.isAutoPlayEnabled)
+        XCTAssertEqual(coordinator.autoPlayFeedback, "OFF")
+
+        try await Task.sleep(for: .milliseconds(1_100))
+        XCTAssertNil(coordinator.autoPlayFeedback)
+
+        coordinator.toggleAutoPlay()
+        XCTAssertTrue(coordinator.isAutoPlayEnabled)
+        XCTAssertEqual(coordinator.autoPlayFeedback, "ON")
+    }
+
+    func testAutoPlayStopsAtDirectoryEnd() async throws {
+        let api = PlayerFakeAPI(
+            details: [detail(url: "https://media.example/episode-1", path: "/Episode 1.mp4")],
+            repeatingListByPath: ["/": [[object("/Episode 1.mp4", type: AListFileType.video.rawValue)]]]
+        )
+        let player = PlayerFakeController()
+        let coordinator = makeCoordinator(api: api, player: player)
+
+        await coordinator.play(object: object("/Episode 1.mp4", type: AListFileType.video.rawValue))
+        try await waitUntil { coordinator.externalSubtitleDiscoveryState == .loaded }
+        player.emit(.ended)
+        try await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertEqual(player.replacedURLs.count, 1)
+        XCTAssertEqual(coordinator.nowPlayingPath, "/Episode 1.mp4")
+    }
+
+    func testUnknownMediaTypesUseFilenameExtensionFallback() async throws {
+        let api = PlayerFakeAPI(
+            details: [
+                detail(url: "https://media.example/part-1", path: "/Part 1.m4v"),
+                detail(url: "https://media.example/part-2", path: "/Part 2.aac")
+            ],
+            repeatingListByPath: ["/": [[
+                object("/Part 1.m4v"),
+                object("/Part 2.aac"),
+                object("/Part 3.txt")
+            ]]]
+        )
+        let player = PlayerFakeController()
+        let coordinator = makeCoordinator(api: api, player: player)
+
+        await coordinator.play(object: object("/Part 1.m4v"))
+        try await waitUntil { coordinator.externalSubtitleDiscoveryState == .loaded }
+        player.emit(.ended)
+        try await waitUntil { player.replacedURLs.count == 2 }
+
+        XCTAssertEqual(coordinator.nowPlayingPath, "/Part 2.aac")
+    }
+
     func testFirstFailureRefreshesAndRestores() async throws {
         let api = PlayerFakeAPI(details: [
             detail(url: "https://media.example/first", path: "/video.mp4"),
@@ -452,11 +594,15 @@ final class PlayerCoordinatorTests: XCTestCase {
             defaults.removePersistentDomain(forName: suite)
             progressStore = PlaybackProgressStore(defaults: defaults)
         }
+        let settingsSuite = "PlayerCoordinatorSettingsTests.\(UUID().uuidString)"
+        let settingsDefaults = UserDefaults(suiteName: settingsSuite)!
+        settingsDefaults.removePersistentDomain(forName: settingsSuite)
         return PlayerCoordinator(
             api: api,
             controller: player,
             progressStore: progressStore,
             subtitleAppearanceStore: SubtitleAppearanceStore(defaults: progressStoreDefaults()),
+            playbackSettingsStore: PlaybackSettingsStore(defaults: settingsDefaults),
             baseURL: URL(string: "https://alist.example")!,
             username: "alice",
             subtitleDataLoader: subtitleDataLoader,
@@ -471,8 +617,8 @@ final class PlayerCoordinatorTests: XCTestCase {
         return defaults
     }
 
-    private func object(_ path: String) -> AListObject {
-        AListObject(virtualPath: path, name: URL(fileURLWithPath: path).lastPathComponent, isDirectory: false)
+    private func object(_ path: String, type: Int? = nil) -> AListObject {
+        AListObject(virtualPath: path, name: URL(fileURLWithPath: path).lastPathComponent, isDirectory: false, type: type)
     }
 
     private func detail(url: String, path: String) -> FileDetail {
@@ -495,6 +641,7 @@ private actor PlayerFakeAPI: AListAPI {
     private var details: [FileDetail]
     private var listPages: [[AListObject]]
     private var listByPath: [String: [[AListObject]]]
+    private var repeatingListByPath: [String: [[AListObject]]]
     private var listFailures: Int
     private let listDelayMilliseconds: Int
     private let log: LockedEventLog?
@@ -504,10 +651,11 @@ private actor PlayerFakeAPI: AListAPI {
     private var heldGetPaths: Set<String> = []
     private var heldGetContinuation: CheckedContinuation<Void, Never>?
 
-    init(details: [FileDetail], listPages: [[AListObject]] = [], listByPath: [String: [[AListObject]]] = [:], listFailures: Int = 0, listDelayMilliseconds: Int = 0, log: LockedEventLog? = nil) {
+    init(details: [FileDetail], listPages: [[AListObject]] = [], listByPath: [String: [[AListObject]]] = [:], repeatingListByPath: [String: [[AListObject]]] = [:], listFailures: Int = 0, listDelayMilliseconds: Int = 0, log: LockedEventLog? = nil) {
         self.details = details
         self.listPages = listPages
         self.listByPath = listByPath
+        self.repeatingListByPath = repeatingListByPath
         self.listFailures = listFailures
         self.listDelayMilliseconds = listDelayMilliseconds
         self.log = log
@@ -549,6 +697,10 @@ private actor PlayerFakeAPI: AListAPI {
             throw AListAPIError.transport(message: "List unavailable")
         }
         // Per-path responses with optional hold
+        if let pages = repeatingListByPath[path], !pages.isEmpty {
+            let index = min(max(page - 1, 0), pages.count - 1)
+            return DirectoryPage(content: pages[index], hasMore: index + 1 < pages.count, page: page, perPage: perPage)
+        }
         if listByPath[path] != nil {
             if heldPaths.remove(path) != nil {
                 await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in

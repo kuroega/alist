@@ -107,7 +107,7 @@ struct FixturePlayerContainerView: View {
 #endif
 
 private struct ImmersivePlaybackStage<VideoContent: View>: View {
-    private enum FocusTarget: Hashable { case surface, close, playPause, rewind, timeline, forward, subtitles, audio, diagnostics, panel, appearance, appearanceReset, appearanceBack, resume, startOver }
+    private enum FocusTarget: Hashable { case surface, close, playPause, rewind, timeline, forward, subtitles, audio, autoplay, diagnostics, panel, appearance, appearanceReset, appearanceBack, resume, startOver }
     private enum PresentedPanel: Equatable { case subtitles, audio, subtitleAppearance }
 
     @ObservedObject var coordinator: PlayerCoordinator
@@ -276,6 +276,7 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
                 Text(coordinator.nowPlayingTitle)
                     .font(.title3.weight(.semibold))
                     .lineLimit(1)
+                    .accessibilityIdentifier("player.now-playing-title")
                 Text(nowPlayingDetail)
                     .font(.subheadline)
                     .foregroundStyle(.white.opacity(0.68))
@@ -344,6 +345,16 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
                         .focused($focus, equals: .audio)
                         .accessibilityIdentifier("player.audio")
                         .accessibilityValue(selectedAudioTitle)
+                }
+                HStack(spacing: 10) {
+                    Button(action: coordinator.toggleAutoPlay) {
+                        Label("Autoplay next", systemImage: "repeat.1")
+                    }
+                    .focused($focus, equals: .autoplay)
+                    .accessibilityIdentifier("player.autoplay-toggle")
+                    .accessibilityLabel("Autoplay next")
+                    .accessibilityValue(autoPlayAccessibilityValue)
+                    AutoplayFeedbackView(coordinator: coordinator)
                 }
                 Button(action: { setDiagnosticsEnabled(diagnostics == nil) }) { Label("Diagnostics", systemImage: "waveform.path.ecg") }
                     .focused($focus, equals: .diagnostics)
@@ -653,6 +664,11 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
     private var displayTime: TimeInterval { scrubTarget ?? currentTime }
     private var nowPlayingDetail: String { coordinator.nowPlayingPath ?? "Video" }
     private var selectedAudioTitle: String { audioTracks.first(where: \.isSelected)?.title ?? "Audio" }
+    private var autoPlayAccessibilityValue: String {
+        let state = coordinator.isAutoPlayEnabled ? "On" : "Off"
+        guard let feedback = coordinator.autoPlayFeedback else { return state }
+        return "\(state) · \(feedback)"
+    }
     private var isOffSelected: Bool { selectedExternalSubtitleID == nil && !embeddedSubtitleTracks.contains(where: \.isSelected) }
     private func isEmbeddedSubtitleSelected(_ id: String) -> Bool { selectedExternalSubtitleID == nil && embeddedSubtitleTracks.first(where: { $0.id == id })?.isSelected == true }
     private func isExternalSubtitleSelected(_ id: String) -> Bool {
@@ -806,6 +822,26 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
             guard !Task.isCancelled, isPlaying, !isBuffering, presentedPanel == nil, diagnostics == nil, !coordinator.isTerminalFailure else { return }
             focus = .surface
             chromeVisible = false
+        }
+    }
+}
+
+private struct AutoplayFeedbackView: View {
+    @ObservedObject var coordinator: PlayerCoordinator
+
+    var body: some View {
+        Group {
+            if let feedback = coordinator.autoPlayFeedback {
+                Text(feedback)
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.tint)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(.white.opacity(0.14), in: Capsule())
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(feedback)
+                    .accessibilityIdentifier("player.autoplay-feedback")
+            }
         }
     }
 }

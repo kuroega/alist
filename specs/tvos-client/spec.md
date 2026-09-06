@@ -68,6 +68,10 @@ This document is the normative behavior source for the tvOS 17 milestone. The te
 
 **Given** a playback session, **when** the user enables diagnostics, **then** a toggleable panel MUST show timing, demux, video, and audio/subtitle counters and metadata no more than once per second. The rendered panel MUST NOT contain URLs, hosts, request headers, credentials, cookies, or tokens.
 
+### TVOS-PLAY-008 — Optional same-directory auto-next
+
+**Given** the user has enabled automatic next playback, **when** a video or audio item reaches its natural end, **then** the client MUST fetch the current directory, filter to video and audio items, sort them by filename in ascending natural order, and play the item immediately after the completed item. Directories, subtitle files, and other non-media files MUST be skipped. The client MUST NOT wrap from the last item to the first, MUST keep the player presented during a transition, and MUST ignore stop events caused by replacement, failure recovery, pause, or exit. The preference MUST persist across launches and default to enabled for new installations.
+
 ## Transport security
 
 ### TVOS-SEC-001 — System TLS only
