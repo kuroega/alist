@@ -101,15 +101,15 @@ final class AListTVUITests: XCTestCase {
 
     func testVisibleSeekButtonsMoveExactlyTenSeconds() {
         openFixturePlayer()
+        let playPause = app.buttons["player.play-pause"]
+        XCTAssertTrue(playPause.waitForExistence(timeout: 3))
         let currentTime = app.staticTexts["player.current-time"]
         let rewind = app.buttons["player.seek-backward-10"]
         let forward = app.buttons["player.seek-forward-10"]
-        let playPause = app.buttons["player.play-pause"]
         let progress = app.descendants(matching: .any)["player.progress"]
         XCTAssertTrue(progress.waitForExistence(timeout: 3))
         XCTAssertGreaterThanOrEqual(progress.frame.width, 500)
-        XCTAssertTrue(currentTime.waitForExistence(timeout: 3))
-        XCTAssertTrue(playPause.waitForExistence(timeout: 3))
+        XCTAssertTrue(currentTime.exists)
         XCTAssertTrue(playPause.exists)
         focus(rewind, direction: .left)
         remote.press(.select)
@@ -117,6 +117,19 @@ final class AListTVUITests: XCTestCase {
         focus(forward, direction: .right)
         remote.press(.select)
         XCTAssertEqual(currentTime.label, "00:45")
+    }
+
+    func testPlayingControlsAutoHideAfterRemoteInactivity() {
+        openFixturePlayer()
+        let playPause = app.buttons["player.play-pause"]
+        XCTAssertTrue(playPause.waitForExistence(timeout: 3))
+
+        remote.press(.up)
+        let hidden = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: playPause)
+        wait(for: [hidden], timeout: 3.75)
+
+        remote.press(.playPause)
+        XCTAssertTrue(playPause.waitForExistence(timeout: 1))
     }
 
     func testResumePromptAndRemotePlaybackToggles() {
@@ -317,6 +330,8 @@ final class AListTVUITests: XCTestCase {
         XCTAssertTrue(video.waitForExistence(timeout: 3))
         focusAndSelect(video, direction: .right)
         XCTAssertTrue(app.buttons["player.seek-backward-10"].waitForExistence(timeout: 3))
+        remote.press(.up)
+        remote.press(.down)
     }
 
     private func login(username: String) {

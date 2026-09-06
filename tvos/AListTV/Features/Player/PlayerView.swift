@@ -226,6 +226,9 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
             if playing { scheduleChromeHideIfNeeded() } else { revealChrome() }
         }
         .onChange(of: isBuffering) { _, buffering in if buffering { revealChrome() } else { scheduleChromeHideIfNeeded() } }
+        .onChange(of: diagnostics) { _, snapshot in
+            if snapshot == nil { scheduleChromeHideIfNeeded() } else { hideChromeTask?.cancel() }
+        }
         .onChange(of: focus) { _, target in
             guard target != nil, target != .surface else { return }
             revealChrome()
@@ -797,10 +800,11 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
 
     private func scheduleChromeHideIfNeeded() {
         hideChromeTask?.cancel()
-        guard isPlaying, !isBuffering, presentedPanel == nil, !coordinator.isTerminalFailure, focus == .surface else { return }
+        guard isPlaying, !isBuffering, presentedPanel == nil, diagnostics == nil, !coordinator.isTerminalFailure else { return }
         hideChromeTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(4))
-            guard !Task.isCancelled, isPlaying, !isBuffering, presentedPanel == nil, !coordinator.isTerminalFailure, focus == .surface else { return }
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled, isPlaying, !isBuffering, presentedPanel == nil, diagnostics == nil, !coordinator.isTerminalFailure else { return }
+            focus = .surface
             chromeVisible = false
         }
     }
