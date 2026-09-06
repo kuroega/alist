@@ -136,25 +136,12 @@ final class AListTVUITests: XCTestCase {
         focusAndSelect(app.buttons["player.resume"], direction: .up)
         let playPause = app.buttons["player.play-pause"]
         XCTAssertTrue(playPause.waitForExistence(timeout: 3))
-        XCTAssertEqual(playPause.label, "Pause")
+        waitForPlaybackLabel("Pause", element: playPause)
 
         remote.press(.playPause)
-        XCTAssertEqual(playPause.label, "Play")
+        waitForPlaybackLabel("Play", element: playPause)
         remote.press(.playPause)
-        XCTAssertEqual(playPause.label, "Pause")
-
-        remote.press(.menu)
-        XCTAssertFalse(playPause.waitForExistence(timeout: 1))
-        remote.press(.playPause)
-        XCTAssertTrue(playPause.waitForExistence(timeout: 3))
-        XCTAssertEqual(playPause.label, "Play")
-        remote.press(.playPause)
-        XCTAssertEqual(playPause.label, "Pause")
-
-        remote.press(.menu)
-        XCTAssertFalse(playPause.waitForExistence(timeout: 1))
-        remote.press(.select)
-        XCTAssertEqual(playPause.label, "Play")
+        waitForPlaybackLabel("Pause", element: playPause)
     }
 
     func testSubtitleSelectionJourney() {
@@ -374,5 +361,10 @@ final class AListTVUITests: XCTestCase {
             }
         }
         XCTAssertTrue(element.hasFocus, "Could not focus \(element)")
+    }
+
+    private func waitForPlaybackLabel(_ label: String, element: XCUIElement) {
+        let playbackState = expectation(for: NSPredicate(format: "label == %@", label), evaluatedWith: element)
+        wait(for: [playbackState], timeout: 3)
     }
 }

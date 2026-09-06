@@ -693,8 +693,7 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
         guard abs(translation.x) > abs(translation.y), isSeekable else { return }
         guard !isPlaying else { return }
         if touchScrubOrigin == nil {
-            touchScrubOrigin = currentTime
-            scrubTarget = nil
+            touchScrubOrigin = scrubTarget ?? currentTime
         }
         guard let origin = touchScrubOrigin else { return }
         scrubTarget = PlaybackPresentation.scrubTarget(

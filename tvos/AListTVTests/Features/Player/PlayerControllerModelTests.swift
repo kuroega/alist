@@ -32,6 +32,24 @@ final class PlayerControllerModelTests: XCTestCase {
         )
     }
 
+    func testScrubTargetCanAccumulateAcrossSwipes() {
+        let firstTarget = PlaybackPresentation.scrubTarget(currentTime: 45, horizontalTranslation: 30, duration: 120)
+        let secondTarget = PlaybackPresentation.scrubTarget(currentTime: firstTarget, horizontalTranslation: 30, duration: 120)
+        let reversedTarget = PlaybackPresentation.scrubTarget(currentTime: secondTarget, horizontalTranslation: -30, duration: 120)
+
+        XCTAssertEqual(firstTarget, 55)
+        XCTAssertEqual(secondTarget, 65)
+        XCTAssertEqual(reversedTarget, 55)
+    }
+
+    func testRepeatedScrubTargetClampsAtTimelineBoundaries() {
+        let endTarget = PlaybackPresentation.scrubTarget(currentTime: 115, horizontalTranslation: 60, duration: 120)
+        let startTarget = PlaybackPresentation.scrubTarget(currentTime: 5, horizontalTranslation: -30, duration: 120)
+
+        XCTAssertEqual(PlaybackPresentation.scrubTarget(currentTime: endTarget, horizontalTranslation: 60, duration: 120), 120)
+        XCTAssertEqual(PlaybackPresentation.scrubTarget(currentTime: startTarget, horizontalTranslation: -30, duration: 120), 0)
+    }
+
     func testResumeTimeTextIncludesHours() {
         XCTAssertEqual(PlaybackPresentation.resumeTimeText(0), "00:00:00")
         XCTAssertEqual(PlaybackPresentation.resumeTimeText(3_723), "01:02:03")
