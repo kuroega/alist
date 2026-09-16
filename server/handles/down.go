@@ -89,6 +89,16 @@ func Proxy(c *gin.Context) {
 			common.ErrorResp(c, err, 500)
 			return
 		}
+		if c.GetBool("private_playback") {
+			// Playback reads are bulk sequential (tens of MB per segment) over
+			// a throttled cloud link: use more parts than interactive defaults
+			// to work around per-connection throttling. Parts stay small so
+			// sparse cue/index seeks do not over-fetch; exact small probe
+			// ranges bypass the part downloader entirely.
+			sourceLink := *link
+			sourceLink.Concurrency, sourceLink.PartSize = 6, 1<<20
+			link = &sourceLink
+		}
 		localProxy(c, link, file, storage.GetStorage().ProxyRange)
 	} else {
 		common.ErrorStrResp(c, "proxy not allowed", 403)

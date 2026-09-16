@@ -316,24 +316,35 @@ tail -n 100 /var/log/alist.log
 
 ### 10.2 `No space left on device`
 
-编译临时文件不要使用容量约 1 GB 的 `/tmp`，使用上面的 `GOTMPDIR=/opt/alist/.gotmp`。确认空间：
+不要在文件系统满载时重启服务、替换 `/opt/alist/alist` 或写入
+`/var/lib/alist/config.json`；配置写入会被截断，服务将无法启动。先确认两个
+文件系统都有可用空间：
 
 ```sh
 df -h / /tmp
 ```
 
-### 10.3 `load config error` 或 JSON 错误
-
-先备份配置，再删除并让 AList 生成默认配置；不要删除 `/var/lib/alist` 整个目录，因为其中包含数据库：
+保留当前二进制和配置的备份需要额外约 300 MB。空间不足时先清理已验证可删除的
+构建产物；不要删除 `/var/lib/alist/data.db`。部署新二进制前，在另一文件系统
+创建配置副本：
 
 ```sh
-cp /var/lib/alist/config.json /var/lib/alist/config.json.bad
-rm /var/lib/alist/config.json
-/opt/alist/alist --data /var/lib/alist --log-std admin
-jq empty /var/lib/alist/config.json
+cp /var/lib/alist/config.json /tmp/config.json.pre-deploy
 ```
 
-然后重新写入 `site_url` 和 `scheme`，最后重启服务。
+### 10.3 `load config error` 或 JSON 错误
+
+配置损坏时，优先恢复最近的已知良好备份，并验证 JSON；不要删除
+`/var/lib/alist` 整个目录，因为其中包含数据库：
+
+```sh
+cp /var/lib/alist/config.json.bak-YYYYMMDD /var/lib/alist/config.json
+jq empty /var/lib/alist/config.json
+rc-service alist restart
+```
+
+只有没有可用备份时，才删除配置并让 AList 生成默认配置；随后必须重新写入
+`site_url` 和 `scheme`。
 
 ### 10.4 `Exec format error`
 
