@@ -281,6 +281,46 @@ http://<VM_IP>:5244
 - `/var/lib/alist/config.json` 中的 `site_url`；
 - tvOS App 中输入的地址。
 
+### 8.1 Web MKV 兼容播放
+
+Web 端兼容播放只处理视频为 H.264/HEVC、音频为 TrueHD、DTS、AC-3 或
+E-AC-3 的 `.mkv` 文件。原始下载和 WebDAV 不使用兼容流。启用前确认：
+
+- VM 已安装 FFmpeg，且 `playback.ffmpeg` 指向可执行文件；
+- `scheme.http_port` 启用了本机 HTTP listener，并且
+  `scheme.force_https=false`；兼容播放通过 `127.0.0.1` 上的内部 `/p` 请求读取
+  原文件，外部仍可通过反向代理提供 HTTPS；
+- 存储允许 AList 代理读取。Local、必须代理、Web Proxy、WebDAV Proxy 和 Quark
+  视频会自动满足；其他只返回直链的存储需要把 `mkv` 加入管理设置的
+  `proxy_types`。
+
+Alpine VM 可这样启用：
+
+```sh
+apk add --no-cache ffmpeg
+jq '.playback.enabled=true
+    | .playback.ffmpeg="/usr/bin/ffmpeg"
+    | .playback.source_cache_dir="/var/lib/alist/playback-cache"
+    | .playback.source_cache_max_mb=16384
+    | .playback.source_chunk_mb=32' \
+  /var/lib/alist/config.json > /var/lib/alist/config.json.tmp &&
+  chown alist:alist /var/lib/alist/config.json.tmp &&
+  chmod 600 /var/lib/alist/config.json.tmp &&
+  mv /var/lib/alist/config.json.tmp /var/lib/alist/config.json
+install -d -o alist -g alist -m 700 /var/lib/alist/playback-cache
+rc-service alist restart
+```
+
+`source_cache_max_mb=0` 会关闭原文件缓存。启用后，兼容播放按 32 MiB
+分块把原文件写入 VM 本地磁盘；分块使用临时文件和原子重命名，重启后继续复用。
+容量不足时只淘汰没有活动会话的最旧文件版本。容量必须大于准备完整缓存的单个
+媒体文件，并在配置前用 `df -h` 给系统、日志和数据库保留余量。缓存目录和文件
+分别限制为 `0700` 和 `0600`，内部原文件端点也只接受 loopback 请求。
+
+打开文件时，AList 会同步读取有限的 Matroska 索引。文件不需要转换、FFmpeg
+不可用或源站 Range 读取失败时，API 保留原始播放地址，不会因为兼容播放失败而
+阻断原有播放路径。
+
 ## 9. 重新编译（仅源码变化时）
 
 VM 当前已经有编译好的二进制。只有需要重新编译时才执行。

@@ -445,12 +445,7 @@ func FsGet(c *gin.Context) {
 	}
 	originalURL := ""
 	if !obj.IsDir() && storageErr == nil && canProxy(storage, obj.GetName()) {
-		compatibleURL, playbackErr := compatiblePlaybackURL(c, user, reqPath, obj)
-		if playbackErr != nil {
-			common.ErrorResp(c, playbackErr, 503)
-			return
-		}
-		if compatibleURL != "" {
+		if compatibleURL, playbackErr := compatiblePlaybackURL(c, user, reqPath, obj); playbackErr == nil && compatibleURL != "" {
 			originalURL, rawURL = rawURL, compatibleURL
 		}
 	}

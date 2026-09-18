@@ -102,12 +102,15 @@ type MCP struct {
 // PlaybackConfig controls optional audio-compatible MKV playback. Original
 // download and WebDAV routes never use the compatibility stream.
 type PlaybackConfig struct {
-	Enabled       bool   `json:"enabled" env:"ENABLED"`
-	FFmpeg        string `json:"ffmpeg" env:"FFMPEG"`
-	MaxSessions   int    `json:"max_sessions" env:"MAX_SESSIONS"`
-	MaxConcurrent int    `json:"max_concurrent" env:"MAX_CONCURRENT"`
-	MaxCacheMB    int    `json:"max_cache_mb" env:"MAX_CACHE_MB"`
-	IdleMinutes   int    `json:"idle_minutes" env:"IDLE_MINUTES"`
+	Enabled          bool   `json:"enabled" env:"ENABLED"`
+	FFmpeg           string `json:"ffmpeg" env:"FFMPEG"`
+	MaxSessions      int    `json:"max_sessions" env:"MAX_SESSIONS"`
+	MaxConcurrent    int    `json:"max_concurrent" env:"MAX_CONCURRENT"`
+	MaxCacheMB       int    `json:"max_cache_mb" env:"MAX_CACHE_MB"`
+	IdleMinutes      int    `json:"idle_minutes" env:"IDLE_MINUTES"`
+	SourceCacheDir   string `json:"source_cache_dir" env:"SOURCE_CACHE_DIR"`
+	SourceCacheMaxMB int    `json:"source_cache_max_mb" env:"SOURCE_CACHE_MAX_MB"`
+	SourceChunkMB    int    `json:"source_chunk_mb" env:"SOURCE_CHUNK_MB"`
 }
 
 type Config struct {
@@ -158,6 +161,7 @@ func DefaultConfig() *Config {
 		Playback: PlaybackConfig{
 			FFmpeg: "ffmpeg", MaxSessions: 8, MaxConcurrent: 2,
 			MaxCacheMB: 128, IdleMinutes: 30,
+			SourceCacheDir: filepath.Join(flags.DataDir, "playback-cache"), SourceChunkMB: 8,
 		},
 		Database: Database{
 			Type:        "sqlite3",

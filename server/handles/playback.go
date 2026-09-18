@@ -30,13 +30,20 @@ func InitPlayback() {
 		return
 	}
 	cfg := conf.Conf.Playback
+	port := conf.Conf.Scheme.HttpPort
+	internalPlayback := url.URL{
+		Scheme: "http", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
+		Path: strings.TrimSuffix(conf.URL.Path, "/") + "/playback",
+	}
 	// Bound response-held buffers too: a slow client can retain an evicted
 	// segment until its HTTP transfer finishes.
 	playbackTransfers = make(chan struct{}, max(1, cfg.MaxSessions))
 	playbackManager = playback.NewManager(playback.Config{
 		FFmpeg: cfg.FFmpeg, MaxSessions: cfg.MaxSessions, MaxConcurrent: cfg.MaxConcurrent,
-		MaxCacheBytes: int64(cfg.MaxCacheMB) * 1024 * 1024,
-		IdleTimeout:   time.Duration(cfg.IdleMinutes) * time.Minute,
+		MaxCacheBytes:  int64(cfg.MaxCacheMB) * 1024 * 1024,
+		IdleTimeout:    time.Duration(cfg.IdleMinutes) * time.Minute,
+		SourceCacheDir: cfg.SourceCacheDir, MaxSourceCacheBytes: int64(cfg.SourceCacheMaxMB) * 1024 * 1024,
+		SourceChunkBytes: int64(cfg.SourceChunkMB) * 1024 * 1024, SourceBaseURL: internalPlayback.String(),
 	})
 }
 
@@ -92,6 +99,21 @@ func Playback(c *gin.Context) {
 		return
 	}
 	id, resource := c.Param("id"), c.Param("resource")
+	if resource == "source" {
+		host, _, _ := net.SplitHostPort(c.Request.RemoteAddr)
+		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		if err := playbackManager.Source(c.Writer, c.Request, id); err != nil && !c.Writer.Written() {
+			if errors.Is(err, playback.ErrExpired) {
+				c.String(http.StatusGone, "Playback session expired; reopen the file")
+			} else {
+				c.String(http.StatusBadGateway, "Playback source cache failed")
+			}
+		}
+		return
+	}
 	session, err := playbackManager.Get(id)
 	if err != nil {
 		c.String(http.StatusGone, "Playback session expired; reopen the file")
@@ -106,6 +128,11 @@ func Playback(c *gin.Context) {
 	index, parseErr := strconv.Atoi(indexText)
 	if !ok || parseErr != nil || index < 0 || strconv.Itoa(index) != indexText || index >= len(session.Index.Boundaries)-1 {
 		c.Status(http.StatusNotFound)
+		return
+	}
+	c.Header("Content-Type", "video/mp4")
+	if c.Request.Method == http.MethodHead {
+		c.Status(http.StatusOK)
 		return
 	}
 	select {
@@ -129,6 +156,5 @@ func Playback(c *gin.Context) {
 		}
 		return
 	}
-	c.Header("Content-Type", "video/mp4")
 	http.ServeContent(c.Writer, c.Request, resource, time.Time{}, bytes.NewReader(data))
 }

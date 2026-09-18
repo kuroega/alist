@@ -75,14 +75,18 @@ func shiftSegmentTimeline(data []byte, start float64) error {
 						return true
 					}
 					v := binary.BigEndian.Uint32(p3[4:8])
+					if off > uint64(^uint32(0))-uint64(v) {
+						walkErr = errors.New("version 0 tfdt overflows")
+						return false
+					}
 					binary.BigEndian.PutUint32(p3[4:8], v+uint32(off))
 				}
 				patched++
 				return true
 			})
-			return true
+			return walkErr == nil
 		})
-		return true
+		return walkErr == nil
 	})
 	if walkErr != nil {
 		return walkErr

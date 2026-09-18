@@ -246,6 +246,44 @@ func TestSessionAccessRefreshesIdleExpiry(t *testing.T) {
 		t.Fatal("expiry did not cancel session work")
 	}
 }
+func TestManagerServesCachedSourceWithinSessionLifetime(t *testing.T) {
+	data := []byte("0123456789abcdef")
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "movie.mkv", time.Time{}, bytes.NewReader(data))
+	}))
+	defer origin.Close()
+	m := NewManager(Config{
+		SourceCacheDir: t.TempDir(), MaxSourceCacheBytes: 16, SourceChunkBytes: 8,
+		SourceBaseURL: "http://127.0.0.1/playback",
+	})
+	entry, err := m.sources.acquire("movie:revision", origin.URL, int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := playbackSessionFixture(m, "capability", "user\x00/movie\x001:1")
+	s.source = entry
+	s.sourceURL = "http://127.0.0.1/playback/capability/source"
+
+	req := httptest.NewRequest(http.MethodGet, s.sourceURL, nil)
+	req.Header.Set("Range", "bytes=3-11")
+	response := httptest.NewRecorder()
+	if err := m.Source(response, req, s.ID); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusPartialContent || !bytes.Equal(response.Body.Bytes(), data[3:12]) {
+		t.Fatalf("cached source response: status=%d body=%q", response.Code, response.Body.Bytes())
+	}
+	if entry.record.active != 1 {
+		t.Fatalf("request retain leaked: active=%d", entry.record.active)
+	}
+	m.Close()
+	if entry.record.active != 0 {
+		t.Fatalf("session close retained source cache: active=%d", entry.record.active)
+	}
+	if err := m.Source(httptest.NewRecorder(), req, s.ID); !errors.Is(err, ErrExpired) {
+		t.Fatalf("closed session source returned %v", err)
+	}
+}
 
 func TestGlobalCacheEvictsLeastRecentlyUsedAllocation(t *testing.T) {
 	m := NewManager(Config{MaxCacheBytes: 8, MaxConcurrent: 1})

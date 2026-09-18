@@ -121,6 +121,26 @@ func TestShiftSegmentTimeline(t *testing.T) {
 	}
 }
 
+func TestShiftSegmentTimelineRejectsV0Overflow(t *testing.T) {
+	moov := mkbox("moov", mkbox("trak", bytes.Join([][]byte{
+		tkhdV0(1), mkbox("mdia", mdhdV0(90000)),
+	}, nil)))
+	data := bytes.Join([][]byte{
+		mkbox("ftyp", []byte("isom")),
+		moov,
+		mkbox("moof", mkbox("traf", bytes.Join([][]byte{
+			tfhd(1), tfdtV0(^uint32(0) - 10),
+		}, nil))),
+	}, nil)
+	original := append([]byte(nil), data...)
+	if err := shiftSegmentTimeline(data, 1); err == nil {
+		t.Fatal("expected version 0 tfdt overflow error")
+	}
+	if !bytes.Equal(data, original) {
+		t.Fatal("overflowing tfdt was modified")
+	}
+}
+
 func TestShiftSegmentTimelineDegrades(t *testing.T) {
 	if err := shiftSegmentTimeline([]byte("junk"), 5); err == nil {
 		t.Fatal("expected error on non-boxes")
