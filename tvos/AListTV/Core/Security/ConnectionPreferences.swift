@@ -82,14 +82,9 @@ enum ServerURLValidator {
         if scheme == "https" {
             return true
         }
-#if DEBUG
         return scheme == "http" && host.map(isPrivateHost) == true
-#else
-        return false
-#endif
     }
 
-#if DEBUG
     private static func isPrivateHost(_ host: String) -> Bool {
         let normalized = host.lowercased()
         if normalized == "localhost" || normalized.hasSuffix(".local") {
@@ -112,5 +107,4 @@ enum ServerURLValidator {
         let isLinkLocal = octets[0] == 0xfe && octets[1] & 0xc0 == 0x80
         return isLoopback || isUniqueLocal || isLinkLocal
     }
-#endif
 }
