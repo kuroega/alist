@@ -21,8 +21,7 @@ final class SubtitleAppearanceTests: XCTestCase {
 
     func testDefaultAppearanceUsesReadableVLCOptions() {
         XCTAssertEqual(SubtitleAppearance.default.vlcMediaOptions, [
-            ":freetype-font=Helvetica Neue",
-            ":freetype-color=#FFFFFF",
+            ":freetype-color=16777215",
             ":freetype-opacity=255"
         ])
     }
@@ -32,7 +31,7 @@ final class SubtitleAppearanceTests: XCTestCase {
 
         XCTAssertEqual(appearance.vlcMediaOptions, [
             ":freetype-font=Menlo",
-            ":freetype-color=#00FFFF",
+            ":freetype-color=65535",
             ":freetype-opacity=128"
         ])
     }

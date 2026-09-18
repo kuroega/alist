@@ -1,3 +1,4 @@
+import CoreText
 import Combine
 import Foundation
 import UIKit
@@ -20,7 +21,7 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
     @Published private(set) var subtitleAppearance = SubtitleAppearance.default
     @Published private(set) var diagnostics: PlaybackDiagnosticsSnapshot?
 
-    private let mediaPlayer = VLCMediaPlayer()
+    private let mediaPlayer = VLCPlayerControllerAdapter.makeMediaPlayer()
     private var continuation: AsyncStream<PlayerEvent>.Continuation!
     private var pendingSeekSeconds: TimeInterval?
     private var pendingExternalSubtitle: ExternalSubtitleOption?
@@ -47,6 +48,14 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
         mediaPlayer.delegate = self
         mediaPlayer.drawable = videoView
         mediaPlayer.timeChangeUpdateInterval = 0.5
+    }
+
+    private static func makeMediaPlayer() -> VLCMediaPlayer {
+        let fontURL = Bundle.main.url(forResource: "NotoSansCJKsc-Regular", withExtension: "otf")
+        if let fontURL {
+            CTFontManagerRegisterFontsForURL(fontURL as CFURL, .process, nil)
+        }
+        return VLCMediaPlayer(options: ["--freetype-font=Noto Sans CJK SC"])
     }
 
     func replaceCurrentItem(url: URL, preservingSelections: Bool) {
@@ -120,7 +129,7 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
             return
         }
         guard let track = mediaPlayer.textTracks.first(where: { $0.trackId == id }), externalTrackIDs[id] == nil else { return }
-        track.isSelectedExclusively = true
+        mediaPlayer.selectTextTracks([track])
         preferredEmbeddedSubtitleTrackID = id
         selectedExternalSubtitleID = nil
         refreshTracks()
@@ -129,7 +138,7 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
     func selectLoadedExternalSubtitle(id: String) -> Bool {
         guard let trackID = externalTrackIDs.first(where: { $0.value == id })?.key,
               let track = mediaPlayer.textTracks.first(where: { $0.trackId == trackID }) else { return false }
-        track.isSelectedExclusively = true
+        mediaPlayer.selectTextTracks([track])
         selectedExternalSubtitleID = id
         preferredEmbeddedSubtitleTrackID = nil
         refreshTracks()
@@ -288,7 +297,7 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
         }
         if let preferredEmbeddedSubtitleTrackID,
            let track = mediaPlayer.textTracks.first(where: { $0.trackId == preferredEmbeddedSubtitleTrackID }), externalTrackIDs[track.trackId] == nil {
-            track.isSelectedExclusively = true
+            mediaPlayer.selectTextTracks([track])
         }
         refreshDiagnostics()
     }

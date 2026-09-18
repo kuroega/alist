@@ -48,12 +48,12 @@ struct SubtitleAppearance: Codable, Equatable, Sendable {
 
         var title: String { rawValue.capitalized }
 
-        var vlcHexColor: String {
+        var vlcColorValue: Int {
             switch self {
-            case .white: "#FFFFFF"
-            case .yellow: "#FFFF00"
-            case .cyan: "#00FFFF"
-            case .green: "#00FF66"
+            case .white: 0xFFFFFF
+            case .yellow: 0xFFFF00
+            case .cyan: 0x00FFFF
+            case .green: 0x00FF66
             }
         }
 
@@ -86,11 +86,14 @@ struct SubtitleAppearance: Codable, Equatable, Sendable {
     static let `default` = SubtitleAppearance(font: .systemSans, color: .white, opacity: .full)
 
     var vlcMediaOptions: [String] {
-        [
-            ":freetype-font=\(font.vlcFontName)",
-            ":freetype-color=\(color.vlcHexColor)",
+        var options = [
+            ":freetype-color=\(color.vlcColorValue)",
             ":freetype-opacity=\(opacity.vlcOpacity)"
         ]
+        if font != .systemSans {
+            options.insert(":freetype-font=\(font.vlcFontName)", at: 0)
+        }
+        return options
     }
 }
 
