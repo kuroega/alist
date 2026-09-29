@@ -34,6 +34,44 @@
 su -
 ```
 
+### 2.1 忘记 Alpine 登录密码
+
+`kuroega` 和 `root` 是 Alpine 系统密码；AList Web 的 `admin` 密码单独管理。
+
+如果还记得 root 密码，只需登录 root 后执行：
+
+```sh
+passwd kuroega
+```
+
+如果 root 和 `kuroega` 都忘记，使用 Alpine ISO 修改硬盘上的密码：
+
+1. 关闭 VM。
+2. 打开 `虚拟机 > 设置 > CD/DVD`，选择 Alpine ISO，并勾选“启动时连接”。
+3. 选择 `虚拟机 > 电源 > 启动时进入固件`。在 PhoenixBIOS 中进入 `Boot`，将
+   `CD-ROM Drive` 调到第一位，按 `F10` 保存并确认。
+4. ISO 启动后应看到 `localhost login:`，输入 `root`；不要进入硬盘系统的
+   `alist login:`。
+5. 当前 VM 的硬盘分区是 `/dev/sda3`（根分区）和 `/dev/sda1`（`/boot`），执行：
+
+```sh
+mount /dev/sda3 /mnt
+mount /dev/sda1 /mnt/boot
+chroot /mnt /bin/sh
+passwd root
+passwd kuroega
+sync
+exit
+umount /mnt/boot
+umount /mnt
+poweroff
+```
+
+6. VM 关机后，在 CD/DVD 设置中取消“启动时连接”，再从硬盘正常启动。
+
+如果仍然看到 `alist login:`，说明没有从 ISO 启动；检查 ISO 路径和 CD/DVD
+连接状态。不要执行 `setup-alpine`，也不要格式化硬盘。
+
 ## 3. 每次重启后的检查
 
 ```sh
