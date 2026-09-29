@@ -3,6 +3,7 @@ package playback
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -174,6 +175,14 @@ func TestPlaylistMatchesIndexedTimeline(t *testing.T) {
 	if !strings.Contains(playlist, "#EXT-X-TARGETDURATION:7\n") || !strings.Contains(playlist, "#EXT-X-PLAYLIST-TYPE:VOD\n") || !strings.HasSuffix(playlist, "#EXT-X-ENDLIST\n") {
 		t.Fatalf("invalid VOD playlist:\n%s", playlist)
 	}
+	// Apple's HLS authoring rules require an EXT-X-MAP for fMP4 media so
+	// players initialize once and then consume media-only fragments.
+	if !strings.Contains(playlist, "#EXT-X-MAP:URI=\"init.mp4\"\n") {
+		t.Fatalf("fMP4 playlist is missing EXT-X-MAP:\n%s", playlist)
+	}
+	if mapAt, firstExtinf := strings.Index(playlist, "#EXT-X-MAP"), strings.Index(playlist, "#EXTINF:"); mapAt == -1 || mapAt > firstExtinf {
+		t.Fatalf("EXT-X-MAP must precede the first segment:\n%s", playlist)
+	}
 	if strings.Contains(playlist, "#EXT-X-DISCONTINUITY\n") {
 		t.Fatal("continuous-timeline playlist must not contain discontinuities")
 	}
@@ -196,6 +205,68 @@ func TestPlaylistMatchesIndexedTimeline(t *testing.T) {
 	}
 	if n != 3 || math.Abs(total-s.Index.Duration) > 1e-9 {
 		t.Fatalf("playlist lost timeline: segments=%d duration=%v", n, total)
+	}
+}
+
+func topBox(typ string, payload []byte) []byte {
+	box := make([]byte, 8+len(payload))
+	binary.BigEndian.PutUint32(box, uint32(len(box)))
+	copy(box[4:], typ)
+	copy(box[8:], payload)
+	return box
+}
+
+func moofBox(seq uint32) []byte {
+	payload := make([]byte, 8)
+	binary.BigEndian.PutUint32(payload[4:], seq)
+	return topBox("moof", topBox("mfhd", payload))
+}
+
+func fragmentSequences(data []byte) []uint32 {
+	var out []uint32
+	walkTopBoxes(data, func(typ string, start, end, payload int) bool {
+		if typ == "moof" {
+			out = append(out, binary.BigEndian.Uint32(data[payload+12:payload+16]))
+		}
+		return true
+	})
+	return out
+}
+
+func TestSplitInitSeparatesInitializationFromMedia(t *testing.T) {
+	init := append(topBox("ftyp", make([]byte, 8)), topBox("moov", make([]byte, 8))...)
+	media := append(moofBox(1), topBox("mdat", make([]byte, 4))...)
+	gotInit, gotMedia, ok := splitInit(append(append([]byte(nil), init...), media...))
+	if !ok || !bytes.Equal(gotInit, init) || !bytes.Equal(gotMedia, media) {
+		t.Fatalf("split failed: ok=%v init=%d media=%d", ok, len(gotInit), len(gotMedia))
+	}
+	if _, _, ok := splitInit(media); ok {
+		t.Fatal("media without an init run must be rejected")
+	}
+	if _, _, ok := splitInit(init); ok {
+		t.Fatal("init without media must be rejected")
+	}
+}
+
+func TestRenumberFragmentsProducesContiguousSequence(t *testing.T) {
+	single := moofBox(1)
+	if n, err := renumberFragments(single, 7); err != nil || n != 1 {
+		t.Fatalf("renumber one fragment: n=%d err=%v", n, err)
+	}
+	if got := fragmentSequences(single); len(got) != 1 || got[0] != 7 {
+		t.Fatalf("sequence = %v, want [7]", got)
+	}
+	// Independently encoded segments each restart at 1; rebasing the second
+	// segment must continue the first segment's sequence without a gap.
+	two := append(moofBox(1), moofBox(1)...)
+	if n, err := renumberFragments(two, 8); err != nil || n != 2 {
+		t.Fatalf("renumber two fragments: n=%d err=%v", n, err)
+	}
+	if got := fragmentSequences(two); len(got) != 2 || got[0] != 8 || got[1] != 9 {
+		t.Fatalf("sequence = %v, want [8 9]", got)
+	}
+	if _, err := renumberFragments(topBox("ftyp", nil), 1); err == nil {
+		t.Fatal("data without a moof must be rejected")
 	}
 }
 
@@ -422,6 +493,7 @@ func TestEncodedSegmentsExcludeSeekPreroll(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Exercise a full middle interval and the final short GOP at EOF.
+	inits := map[int][]byte{}
 	for _, n := range []int{1, 3} {
 		start := session.Index.Boundaries[n]
 		end := min(session.Index.Boundaries[n+1], 32)
@@ -430,6 +502,24 @@ func TestEncodedSegmentsExcludeSeekPreroll(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// Players read EXT-X-MAP once and then fetch media-only fragments;
+			// each segment must split cleanly into a shared init and its media.
+			init, media, ok := splitInit(data)
+			if !ok {
+				t.Fatal("encoded segment is missing its init or media run")
+			}
+			if len(init) < 8 || string(init[4:8]) != "ftyp" {
+				t.Fatal("init run must start with an ftyp box")
+			}
+			if len(media) < 8 || string(media[4:8]) != "moof" {
+				t.Fatal("media run must start with a moof box")
+			}
+			// A per-segment reset to 1 makes VLC 4 treat every fragment after
+			// the first as a passive seek; the sequence must advance globally.
+			if seqs := fragmentSequences(data); len(seqs) != 1 || seqs[0] != uint32(n)+1 {
+				t.Fatalf("segment %d fragment sequence = %v, want [%d]", n, seqs, n+1)
+			}
+			inits[n] = append([]byte(nil), init...)
 			segment := filepath.Join(t.TempDir(), "segment.mp4")
 			if err := os.WriteFile(segment, data, 0600); err != nil {
 				t.Fatal(err)
@@ -510,5 +600,15 @@ func TestEncodedSegmentsExcludeSeekPreroll(t *testing.T) {
 				t.Fatal("segment decoded frames differ from the indexed source interval")
 			}
 		})
+	}
+	if len(inits) == 2 && !bytes.Equal(inits[1], inits[3]) {
+		t.Fatal("segments must share one initialization segment")
+	}
+	init, err := m.Init(ctx, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(init, inits[1]) {
+		t.Fatal("Manager.Init did not return the shared initialization segment")
 	}
 }

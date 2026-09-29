@@ -193,3 +193,112 @@ func trackTimescales(moov []byte) map[uint32]uint32 {
 	})
 	return out
 }
+
+// walkTopBoxes calls fn for every top-level box in data with its type and byte
+// range. Iteration stops early when fn returns false or a box is malformed.
+// A zero size means the box extends to the end of data, matching ISO-BMFF.
+func walkTopBoxes(data []byte, fn func(typ string, start, end, payload int) bool) {
+	off := 0
+	for off+8 <= len(data) {
+		size := int(binary.BigEndian.Uint32(data[off : off+4]))
+		typ := string(data[off+4 : off+8])
+		head := 8
+		if size == 1 {
+			if off+16 > len(data) {
+				return
+			}
+			size = int(binary.BigEndian.Uint64(data[off+8 : off+16]))
+			head = 16
+		}
+		end := len(data)
+		if size != 0 {
+			if size < head || off+size > len(data) {
+				return
+			}
+			end = off + size
+		}
+		if !fn(typ, off, end, off+head) {
+			return
+		}
+		off = end
+	}
+}
+
+// splitInit divides a self-initialized fragmented MP4 segment into its
+// initialization run (ftyp+moov) and its media run (moof+mdat...). HLS serves
+// the init once as EXT-X-MAP and every media segment without it, because a
+// moov embedded in each fragment makes players reset their decoder on the
+// repeated moov.
+func splitInit(data []byte) (init, media []byte, ok bool) {
+	end := -1
+	sawMoof := false
+	walkTopBoxes(data, func(typ string, start, stop, payload int) bool {
+		switch typ {
+		case "ftyp":
+			if start != 0 {
+				return false
+			}
+		case "moov":
+			if end != -1 {
+				return false
+			}
+			end = stop
+		case "moof":
+			if end == -1 {
+				return false
+			}
+			sawMoof = true
+			return false
+		}
+		return true
+	})
+	if !sawMoof {
+		return nil, nil, false
+	}
+	return data[:end], data[end:], true
+}
+
+// SplitInit exposes splitInit to the HTTP layer.
+func SplitInit(data []byte) (init, media []byte, ok bool) {
+	return splitInit(data)
+}
+
+// renumberFragments rewrites every top-level moof's mfhd sequence number so
+// independently encoded segments form one contiguous global sequence in
+// playlist order. VLC 4 treats a sequence gap as a passive seek and resets
+// inter-frame prediction, so a per-segment reset to 1 breaks decoding. It
+// returns the number of fragments patched.
+func renumberFragments(data []byte, first uint32) (int, error) {
+	seq := first
+	count := 0
+	var err error
+	walkTopBoxes(data, func(typ string, start, stop, payload int) bool {
+		if typ != "moof" {
+			return true
+		}
+		if err = setFragmentSequence(data[payload:stop], seq); err != nil {
+			return false
+		}
+		seq++
+		count++
+		return true
+	})
+	if err != nil {
+		return count, err
+	}
+	if count == 0 {
+		return 0, errors.New("playback segment has no fragment header")
+	}
+	return count, nil
+}
+
+// setFragmentSequence writes seq into the first mfhd child of a moof payload.
+// mfhd is muxer-mandated to be the first child of moof: size(4) type(4)
+// version+flags(4) sequence_number(4).
+func setFragmentSequence(moof []byte, seq uint32) error {
+	if len(moof) < 16 || string(moof[4:8]) != "mfhd" {
+		return errors.New("playback fragment has no sequence header")
+	}
+	binary.BigEndian.PutUint32(moof[12:16], seq)
+	return nil
+}

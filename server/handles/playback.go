@@ -124,6 +124,20 @@ func Playback(c *gin.Context) {
 		http.ServeContent(c.Writer, c.Request, resource, time.Time{}, bytes.NewReader(session.Playlist()))
 		return
 	}
+	if resource == "init.mp4" {
+		data, err := playbackManager.Init(c.Request.Context(), id)
+		if err != nil {
+			if errors.Is(err, playback.ErrExpired) {
+				c.String(http.StatusGone, "Playback session expired; reopen the file")
+			} else {
+				c.String(http.StatusBadGateway, "Playback initialization segment could not be generated")
+			}
+			return
+		}
+		c.Header("Content-Type", "video/mp4")
+		http.ServeContent(c.Writer, c.Request, resource, time.Time{}, bytes.NewReader(data))
+		return
+	}
 	indexText, ok := strings.CutSuffix(resource, ".m4s")
 	index, parseErr := strconv.Atoi(indexText)
 	if !ok || parseErr != nil || index < 0 || strconv.Itoa(index) != indexText || index >= len(session.Index.Boundaries)-1 {
@@ -156,5 +170,12 @@ func Playback(c *gin.Context) {
 		}
 		return
 	}
-	http.ServeContent(c.Writer, c.Request, resource, time.Time{}, bytes.NewReader(data))
+	// Serve media without the init boxes: EXT-X-MAP points players at
+	// init.mp4, and a moov repeated inside every fragment resets decoders.
+	_, media, ok := playback.SplitInit(data)
+	if !ok {
+		c.String(http.StatusBadGateway, "Compatible media segment could not be generated")
+		return
+	}
+	http.ServeContent(c.Writer, c.Request, resource, time.Time{}, bytes.NewReader(media))
 }

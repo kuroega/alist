@@ -66,6 +66,10 @@ type Session struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	segments   map[int]*segmentCall
+	// init is the shared fMP4 initialization segment (ftyp+moov) served as
+	// EXT-X-MAP. HLS media segments must not carry their own init data, so it
+	// is captured from the first encoded segment and reused for the session.
+	init []byte
 }
 
 // Playlist uses the continuous timeline applied by shiftSegmentTimeline.
@@ -76,7 +80,7 @@ func (s *Session) Playlist() []byte {
 	for n := 1; n < len(s.Index.Boundaries); n++ {
 		longest = math.Max(longest, s.Index.Boundaries[n]-s.Index.Boundaries[n-1])
 	}
-	fmt.Fprintf(&b, "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:%.0f\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n", math.Ceil(longest))
+	fmt.Fprintf(&b, "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:%.0f\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MAP:URI=\"init.mp4\"\n", math.Ceil(longest))
 	for n := 0; n+1 < len(s.Index.Boundaries); n++ {
 		fmt.Fprintf(&b, "#EXTINF:%s,\n%d.m4s\n", seconds(s.Index.Boundaries[n+1]-s.Index.Boundaries[n]), n)
 	}
@@ -484,6 +488,19 @@ func (m *Manager) Segment(ctx context.Context, id string, n int) ([]byte, error)
 	if err == nil {
 		err = encodeCtx.Err()
 	}
+	if err == nil {
+		// Segments are encoded independently, so ffmpeg restarts the fragment
+		// sequence at 1 for every segment. VLC 4 interprets that reset as a
+		// passive seek (FragPrepareChunk with a discontinuity) and loses
+		// inter-frame prediction. Rebase each segment to one contiguous global
+		// sequence in playlist order.
+		fragments, seqErr := renumberFragments(data, uint32(n)+1)
+		if seqErr != nil {
+			err = seqErr
+		} else if fragments != 1 {
+			err = fmt.Errorf("playback segment %d emitted %d fragments, want 1", n, fragments)
+		}
+	}
 	stop()
 	cancel()
 	// No URLs, paths, or session IDs: segment index, byte size, and wall
@@ -497,6 +514,12 @@ func (m *Manager) Segment(ctx context.Context, id string, n int) ([]byte, error)
 		err = ErrExpired
 	}
 	if err == nil {
+		if s.init == nil {
+			if init, _, ok := splitInit(data); ok {
+				// Copy: the init must not pin the whole segment buffer in memory.
+				s.init = append([]byte(nil), init...)
+			}
+		}
 		m.cacheSegmentLocked(key, data)
 		call.data = data
 	}
@@ -504,6 +527,39 @@ func (m *Manager) Segment(ctx context.Context, id string, n int) ([]byte, error)
 	close(call.done)
 	m.mu.Unlock()
 	return call.data, call.err
+}
+
+// Init returns the shared fMP4 initialization segment (ftyp+moov) for a
+// session's EXT-X-MAP. It is captured from the first successfully encoded
+// segment; if none is available yet it encodes segment 0 to derive one.
+func (m *Manager) Init(ctx context.Context, id string) ([]byte, error) {
+	m.mu.Lock()
+	m.expireLocked()
+	s := m.sessions[id]
+	if s == nil || m.closed {
+		m.mu.Unlock()
+		return nil, ErrExpired
+	}
+	if s.init != nil {
+		data := s.init
+		m.mu.Unlock()
+		return data, nil
+	}
+	m.mu.Unlock()
+	if _, err := m.Segment(ctx, id, 0); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	m.expireLocked()
+	defer m.mu.Unlock()
+	s = m.sessions[id]
+	if s == nil || m.closed {
+		return nil, ErrExpired
+	}
+	if s.init == nil {
+		return nil, errors.New("playback initialization segment unavailable")
+	}
+	return s.init, nil
 }
 
 func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceURL, videoCodec string, seek, start, duration float64) ([]byte, error) {
@@ -547,11 +603,15 @@ func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceU
 		// emitted audio track ends at the indexed segment boundary.
 		"-af", fmt.Sprintf("aresample=48000:async=1:first_pts=0,atrim=duration=%s", seconds(math.Max(0, duration-1024.0/48000))), "-filter_threads", "1",
 		"-max_muxing_queue_size", "1024", "-avoid_negative_ts", "make_non_negative",
-		// Fragmented MP4 with per-segment init: players use ffmpeg-written
-		// decoder configuration instead of demuxer-built config from a
-		// transport stream, which strict decoders rejected with black video.
-		// Apply the playlist origin to the emitted decode timestamps below.
-		"-movflags", "+frag_keyframe+empty_moov+default_base_moof",
+		// Fragmented MP4 with one fragment per segment: players use
+		// ffmpeg-written decoder configuration instead of demuxer-built config
+		// from a transport stream, which strict decoders rejected with black
+		// video. A single moof per segment lets the fragment sequence number be
+		// made globally contiguous across the playlist; VLC treats a gap as a
+		// passive seek and resets prediction. Apply the playlist origin to the
+		// emitted decode timestamps below.
+		"-movflags", "+empty_moov+default_base_moof",
+		"-frag_duration", strconv.FormatInt(int64((duration+1)*1e6), 10),
 		"-f", "mp4", "pipe:1",
 	}
 	cmd := exec.CommandContext(ctx, m.ffmpeg, args...)

@@ -186,7 +186,7 @@ local proxy error: context canceled
 - `down_concurrency` 从 3 提高到 5 或 6 是后续可测的 Quark 上游调优项；必须通过持续吞吐对照验证，不能盲目修改。
 - `AttributeGraph` 循环应修复，但不应被误判为当前低输入速率的唯一原因。
 
-## 待接手：播放数分钟后音频逐渐落后于画面（2026-09-29，未解决）
+## 已解决：播放数分钟后音频逐渐落后于画面（2026-09-29）
 
 用户在 tvOS 26.5 Simulator 上播放 MKV 时报告：开始同步，约 3–5 分钟后逐渐失步，**音频比视频慢**。这是独立于上文冷缓存带宽问题的待查现象；不要把既有结论套用到此次样本。此前提交 `05e5ea2b` 修改了 `internal/playback/manager.go` 的 AAC 分片裁剪和原文件缓存预取，但没有验证能解决这一现象。tvOS App 通过 `PlayerCoordinator` 播放 `/api/fs/get` 返回的 `raw_url`；后端可能返回兼容播放 HLS，也可能回退为原始 MKV，尚未确认本次实际 URL 类型或 VM 部署版本。
 
@@ -195,3 +195,22 @@ local proxy error: context canceled
 **候选问题，尚非根因结论：** `internal/playback/manager.go` 对每个分片独立编码 AAC，`aresample=48000:async=1:first_pts=0` 后裁去 1024/48000 秒（约 21.33 ms）的滤镜输入来匹配 EXTINF。现有 `TestEncodedSegmentsExcludeSeekPreroll` 只验证视频帧及音频轨道报告的结束时间，不验证跨分片的实际音频内容连续性、起始静音、AAC priming 或播放时钟。若当前流是 HLS，这里值得优先用实际样本验证；若是原始 MKV，则不能把后端分片裁剪归咎于问题。
 
 接手时先确认 VM 上部署的 commit 和 `/api/fs/get` 对**该文件**实际返回的是 `.m3u8` 还是 MKV（勿记录 token、签名 URL 或文件私人路径）。经用户核验 SSH 主机密钥后采集 AList 分片生成耗时/失败日志；从有权限的样本导出相邻分片，比较音视频 PTS/DTS、解码后的音频内容与原始 MKV，在开始、3 分钟和 5 分钟处测量同一事件的 A-V 偏差。同时通过 VLC 诊断记录播放时的音频缓冲丢失、时钟/PTS 和视频丢帧；区分持续线性漂移与分片交界的阶梯式漂移。若是原始 MKV，优先检查源流时间戳、VLC 解复用/音频输出及网络断流，不要修改 HLS 转码参数。取得这些证据前不要宣称已确定根因或已修复。
+
+### 结论与修复（2026-09-29，已在 VM 验证并部署）
+
+**根因：** 每个分片独立编码 AAC 时，编码器会在分片起始插入 1024 采样（48 kHz 下 21.333 ms）的 priming 帧。输出 fMP4 没有 edit list，因此该分片音频轨实际长度是 `EXTINF + 1024/48000` 秒，而视频轨严格等于 `EXTINF`。播放器按 `EXTINF` 推进时间轴，于是每个分片音频落后约 21.33 ms；3–5 分钟（约 30–50 个分片）后累计到 0.6–1.1 秒，与用户报告的“音频比视频慢”一致。
+
+**验证方法（VM，ffmpeg 8.1.2）：** 用有权限的真实样本按生产参数连续生成 40 个分片：视频时长对所有分片都精确等于 `EXTINF`，音频时长恒为 `EXTINF + 21.333 ms`；跨分片互相关显示音频内容整体前移同一常量，说明是每分片固定 offset 而非后端累计漂移。
+
+**修复（step 1，`05e5ea2b`）：** `-af` 末尾追加 `atrim=duration=EXTINF-1024/48000`，把音频裁到与 `EXTINF` 一致。验证：`audio duration == EXTINF`，整条播放列表 `audio == video == 40.000 s`，ffmpeg 解码无告警。
+
+**修复（step 2，同时修复 fMP4/HLS 一致性）：** 之前每个分片自带 `ftyp+moov`，播放列表没有 `#EXT-X-MAP`，且每个分片的 `mfhd` 序号都从 1 重新开始。VLC 4 的 `mp4` 解复用器在 `FragPrepareChunk` 收到序号不连续时会执行一次被动 seek 并重置帧间预测，产生 H.264 参考帧错误。现在：
+- mp4 muxer 改为 `-movflags +empty_moov+default_base_moof` 且 `-frag_duration` 大于分片时长，使每个分片恰好一个 `moof`；
+- 播放列表增加 `#EXT-X-MAP:URI="init.mp4"`，新增 `/playback/{id}/init.mp4` 返回共享的 `ftyp+moov`；
+- `.m4s` 响应剥离 `ftyp/moov` 只留媒体，并把唯一的 `mfhd` 序号改写为全局连续的 `n+1`。
+
+**端到端验证：** VM 上用 `ffmpeg 8.1.2` 构建新二进制并以临时实例实测：播放列表含 `EXT-X-MAP`；`init.mp4` 只有 `ftyp+moov`；`0..6.m4s` 各恰好一个 `moof`，`mfhd` 序号 `1..7` 连续；每个分片 `audio duration == video duration == EXTINF`；整条列表 `audio == video == 40.000 s`；桌面 VLC 4.0.0-dev 完整播放 7 个分片，H.264 解码错误为 0（仅有开头正常的 `Fragment sequence discontinuity 1 != 0`）。`go test ./internal/playback/...` 在 VM（ffmpeg 8.1.2）与本地均通过。
+
+**部署：** VM 二进制更新为 sha256 `76c7335748e80a2720309f2a0de93dd9a1242945d7268a71ac8dce4781384b93`（2026-09-29），旧二进制备份于 `/opt/alist/alist.pre-extmap`，源缓存未动。
+
+**遗留：** `Manager.Init` 在会话内尚无分片时会编码分片 0 以取得 `moov`；从中间位置恢复播放时会多做一次分片 0 编码（源缓存热时约 0.2–0.5 s）。另外 `atrim` 只对齐了分片边界时长，未补偿分片起始的解码 priming；连续播放不受影响，但若要逐分片拼接解码，需 edit list 或丢弃解码 priming 才能完全无损。下一步应在 tvOS Simulator 上用实际样本复测开始/3 分钟/5 分钟的 A-V 偏差以确认端到端修复。
