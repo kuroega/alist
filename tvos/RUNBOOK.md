@@ -188,6 +188,7 @@ xcodebuild \
 | `buildPluginList` 无法加载 `RawCamera.bundle`，路径含 `Debug-appletvsimulator` 或 `.simruntime` | 当前运行目标是 Simulator，不是实机；选择 `Product → Destination`，在 `Devices` 分组重新选择已配对的 Apple TV（避免同名 Simulator），然后选择 `Product → Clean Build Folder` 并再次 Run。实机构建产物路径应为 `Debug-appletvos`。若 Apple TV 不在 `Devices` 分组，回到 `Window → Devices and Simulators → Devices` 确认其已配对且状态完成，并确认 Xcode 安装了匹配的 tvOS 平台支持。 |
 | 未受监管 Apple TV 安装 mkcert profile 后仍提示证书无效 | 手动安装不保证根 CA 获得完全 TLS 信任；不要重复安装同一 profile。Debug 实机改用 `http://<Mac 私网 IP>:5244`，或使用受监管/MDM/设备已信任 CA 的 HTTPS。 |
 | 能在 Mac 浏览器访问、设备不能访问 | 不要在设备上使用 `localhost`；使用 Mac 私网 IP 或局域网 DNS/Bonjour 主机名，检查防火墙和同一网络。 |
+| Simulator 登录显示 `Keychain operation failed (-34018)` | 这是 App 保存登录 token 时的 Keychain 权限错误，不等于 AList 登录失败。`securityd` 日志若出现 `Client has neither application-identifier nor keychain-access-groups entitlements`，检查**已安装的 App** 的签名权限：`codesign -d --entitlements - "$(xcrun simctl get_app_container booted com.alist.tv app)"`。不要用 `CODE_SIGNING_ALLOWED=NO` 构建需要 Keychain 的 App。本机曾出现即使重新启用 Xcode 签名，最终 App 的签名权限仍为空（Keychain group 仅在 `AListTV.app-Simulated.xcent` 中）；手工重签该文件则导致 Simulator 拒绝启动。该问题尚未验证修复，不能只凭 `BUILD SUCCEEDED` 判定已解决；需核对已安装 App 权限及实际登录结果。不要为排查而抹除 Simulator，否则会丢失本地数据。 |
 | 登录后立即回到连接页 | 查看服务日志中的 `/api/auth/login` 与 `/api/me` 响应；确认用户状态、密码和权限。 |
 | 文件可见但无法播放 | 确认 `site_url` 与 App 输入的设备可访问地址相同；检查 `/api/fs/get` 返回的播放 URL，并确认媒体 Range 请求返回 `206`。 |
 | 改完 `config.json` 无效 | AList 仅在进程启动时读取配置；停止后重新启动服务。 |

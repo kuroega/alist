@@ -412,6 +412,17 @@ chown alist:alist /var/log/alist.log
 chmod 640 /var/log/alist.log
 ```
 
+### 10.7 tvOS Simulator 登录报 `Keychain operation failed (-34018)`
+
+这是 tvOS App 的 Keychain 权限错误，不是 VM 上的 AList 密码或服务错误。
+若 Simulator 的 `securityd` 报 `Client has neither application-identifier nor keychain-access-groups entitlements`，说明已安装 App 无法使用 Keychain 保存 token。不要用 `CODE_SIGNING_ALLOWED=NO` 构建该 App；检查已安装 App 的签名权限：
+
+```sh
+codesign -d --entitlements - "$(xcrun simctl get_app_container booted com.alist.tv app)"
+```
+
+本机曾出现启用签名后 App 的签名权限仍为空（权限只出现在构建过程的 `AListTV.app-Simulated.xcent` 中）；手工用该文件重签又会导致 Simulator 拒绝启动。**目前没有验证通过的修复**；不能仅凭 Xcode 构建成功判断登录可用。进一步的 Simulator 签名排查及验证见 [RUNBOOK.md 的故障定位](RUNBOOK.md#5-故障定位)。不要为此重置 VM 数据或清空 Simulator。
+
 ## 11. 安全注意
 
 - 不要把任何密码提交到仓库或发到聊天。
