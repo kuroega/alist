@@ -581,6 +581,17 @@ func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceU
 	// interval's frames. Otherwise a 10-second interval can contain 15 seconds
 	// of video but only 10 seconds of audio, overlapping the following segment.
 	bsf += fmt.Sprintf(",noise=drop='lt(pts*tb,0)+gte(pts*tb,%s)'", seconds(duration))
+	// Independently encoded AAC is emitted in whole 1024-sample frames.
+	// Anchor the number of decoded frames to a single global sample grid;
+	// rounding each segment's duration independently leaves a partial last
+	// packet which decoders render as a full frame, accumulating A/V drift.
+	const aacFrame = 1024.0 / 48000
+	firstFrame := math.Round(start / aacFrame)
+	lastFrame := math.Round((start + duration) / aacFrame)
+	audioInputSamples := int64(lastFrame-firstFrame-1) * 1024 // encoder adds one priming frame
+	if audioInputSamples < 0 {
+		return nil, errors.New("playback segment is too short for AAC")
+	}
 	args := []string{
 		"-hide_banner", "-nostdin", "-loglevel", "warning", "-xerror",
 		"-abort_on", "empty_output+empty_output_stream",
@@ -591,18 +602,18 @@ func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceU
 		// bitstream filter and audio resampler trim against that shared origin.
 		"-seek_timestamp", "1", "-ss", seconds(seek), "-itsoffset", seconds(seek - start),
 		"-noaccurate_seek", "-i", sourceURL,
-		"-t", seconds(duration), "-map", "0:v:0", "-map", "0:a:0",
+		// Allow the final complete AAC frame past the video boundary; video
+		// packets beyond the boundary are removed by the bitstream filter.
+		"-t", seconds(duration + 2*aacFrame), "-map", "0:v:0", "-map", "0:a:0",
 		"-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn",
 		"-c:v", "copy", "-bsf:v", bsf,
 		"-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000", "-threads:a", "1",
 		// Trim negative seek preroll and fill any initial audio gap against
 		// video's origin; never reset audio independently with PTS-STARTPTS.
-		// The AAC encoder adds one 1024-sample priming frame on every fresh
-		// segment. With fragmented MP4 this frame extends the audio track past
-		// EXTINF, accumulating overlap against the copied video on playback.
-		// Limit the filter output by the encoder's priming duration so the
-		// emitted audio track ends at the indexed segment boundary.
-		"-af", fmt.Sprintf("aresample=48000:async=1:first_pts=0,atrim=duration=%s", seconds(math.Max(0, duration-1024.0/48000))), "-filter_threads", "1",
+		// Exactly N-1 input frames produce N AAC packets including priming.
+		// Do not use a fractional atrim duration: its last packet advertises
+		// a short duration but still decodes to a whole frame in HLS players.
+		"-af", fmt.Sprintf("aresample=48000:async=1:first_pts=0,atrim=end_sample=%d", audioInputSamples), "-filter_threads", "1",
 		"-max_muxing_queue_size", "1024", "-avoid_negative_ts", "make_non_negative",
 		// Fragmented MP4 with one fragment per segment: players use
 		// ffmpeg-written decoder configuration instead of demuxer-built config
@@ -645,6 +656,9 @@ func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceU
 	}
 	if err := shiftSegmentTimeline(out.data, start); err != nil {
 		return nil, fmt.Errorf("playback segment timeline: %w", err)
+	}
+	if err := alignAACFrameTimeline(out.data, uint64(firstFrame)*1024); err != nil {
+		return nil, fmt.Errorf("playback segment AAC timeline: %w", err)
 	}
 	return out.data, nil
 }

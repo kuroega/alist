@@ -561,9 +561,9 @@ func TestEncodedSegmentsExcludeSeekPreroll(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Exercise a full middle interval and the final short GOP at EOF.
+	// Exercise adjacent middle intervals and the final short GOP at EOF.
 	inits := map[int][]byte{}
-	for _, n := range []int{1, 3} {
+	for _, n := range []int{1, 2, 3} {
 		start := session.Index.Boundaries[n]
 		end := min(session.Index.Boundaries[n+1], 32)
 		t.Run(seconds(start), func(t *testing.T) {
@@ -594,24 +594,25 @@ func TestEncodedSegmentsExcludeSeekPreroll(t *testing.T) {
 				t.Fatal(err)
 			}
 			output, err := exec.CommandContext(ctx, ffprobe, "-v", "error",
-				"-show_packets", "-show_entries", "packet=stream_index,pts_time,flags",
+				"-show_packets", "-show_entries", "packet=stream_index,pts_time,duration_time,flags",
 				"-of", "json", segment).Output()
 			if err != nil {
 				t.Fatal(err)
 			}
 			var probe struct {
 				Packets []struct {
-					Stream int    `json:"stream_index"`
-					PTS    string `json:"pts_time"`
-					Flags  string `json:"flags"`
+					Stream   int    `json:"stream_index"`
+					PTS      string `json:"pts_time"`
+					Duration string `json:"duration_time"`
+					Flags    string `json:"flags"`
 				} `json:"packets"`
 			}
 			if err := json.Unmarshal(output, &probe); err != nil {
 				t.Fatal(err)
 			}
-			// Each fresh AAC encoder adds a priming frame. Its padding must
-			// not extend the audio track beyond this playlist interval: even
-			// a small excess here accumulates across a long VOD playlist.
+			// AAC frames are whole 1024-sample units on a global grid.
+			// A fractional final packet only *claims* to end at EXTINF;
+			// decoders still output its full 1024 samples and drift on VOD.
 			var streams struct {
 				Streams []struct {
 					Index    int    `json:"index"`
@@ -627,12 +628,28 @@ func TestEncodedSegmentsExcludeSeekPreroll(t *testing.T) {
 					continue
 				}
 				audioEnd, err := strconv.ParseFloat(stream.Duration, 64)
-				if err != nil || math.Abs(audioEnd-end) > 0.003 {
-					t.Fatalf("audio duration %s does not match playlist interval %v", stream.Duration, end-start)
+				wantEnd := math.Round(end*48000/1024) * 1024 / 48000
+				if err != nil || math.Abs(audioEnd-wantEnd) > 0.001 {
+					t.Fatalf("audio end %s != global AAC boundary %.6f", stream.Duration, wantEnd)
 				}
 			}
-			frames := 0
+			frames, audioFrames := 0, 0
 			for _, packet := range probe.Packets {
+				if packet.Stream == 1 {
+					d, err := strconv.ParseFloat(packet.Duration, 64)
+					if err != nil || math.Abs(d-1024.0/48000) > 0.00001 {
+						t.Fatalf("AAC packet %d has partial duration %s", audioFrames, packet.Duration)
+					}
+					if audioFrames == 0 {
+						pts, err := strconv.ParseFloat(packet.PTS, 64)
+						want := math.Round(start*48000/1024) * 1024 / 48000
+						if err != nil || math.Abs(pts-want) > 0.001 {
+							t.Fatalf("AAC begins at %s instead of %.6f", packet.PTS, want)
+						}
+					}
+					audioFrames++
+					continue
+				}
 				if packet.Stream != 0 {
 					continue
 				}
@@ -644,6 +661,10 @@ func TestEncodedSegmentsExcludeSeekPreroll(t *testing.T) {
 					t.Fatal("segment must start with an independently decodable frame")
 				}
 				frames++
+			}
+			wantAudio := int(math.Round(end*48000/1024) - math.Round(start*48000/1024))
+			if audioFrames != wantAudio {
+				t.Fatalf("interval has %d AAC frames, want %d", audioFrames, wantAudio)
 			}
 			wantFrames := int(math.Round((end - start) * 24))
 			if frames != wantFrames {
@@ -670,7 +691,7 @@ func TestEncodedSegmentsExcludeSeekPreroll(t *testing.T) {
 			}
 		})
 	}
-	if len(inits) == 2 && !bytes.Equal(inits[1], inits[3]) {
+	if len(inits) == 3 && (!bytes.Equal(inits[1], inits[2]) || !bytes.Equal(inits[1], inits[3])) {
 		t.Fatal("segments must share one initialization segment")
 	}
 	init, err := m.Init(ctx, session.ID)

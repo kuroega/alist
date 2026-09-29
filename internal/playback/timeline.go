@@ -97,6 +97,94 @@ func shiftSegmentTimeline(data []byte, start float64) error {
 	return nil
 }
 
+// alignAACFrameTimeline places independently encoded AAC fragments on one
+// global 1024-sample grid. Each segment emits a whole number of decoded AAC
+// frames, so adjacent audio runs meet exactly even when video GOP boundaries
+// aren't AAC frame boundaries. Run after shiftSegmentTimeline: tfdt is absolute.
+func alignAACFrameTimeline(data []byte, firstSample uint64) error {
+	moov, ok := findTopBox(data, "moov", 1<<20)
+	if !ok {
+		return errors.New("moov not found")
+	}
+	var audioID uint32
+	eachBox(moov, func(typ string, trak []byte) bool {
+		if typ != "trak" {
+			return true
+		}
+		var id uint32
+		var audio bool
+		eachBox(trak, func(typ string, p []byte) bool {
+			switch typ {
+			case "tkhd":
+				if len(p) >= 24 && p[0] == 1 {
+					id = binary.BigEndian.Uint32(p[20:24])
+				} else if len(p) >= 16 && p[0] == 0 {
+					id = binary.BigEndian.Uint32(p[12:16])
+				}
+			case "mdia":
+				eachBox(p, func(typ string, p []byte) bool {
+					if typ == "hdlr" && len(p) >= 12 && string(p[8:12]) == "soun" {
+						audio = true
+					}
+					return true
+				})
+			}
+			return true
+		})
+		if audio {
+			audioID = id
+			return false
+		}
+		return true
+	})
+	if audioID == 0 || trackTimescales(moov)[audioID] != 48000 {
+		return errors.New("AAC track timescale is not 48000")
+	}
+	var tfdt []byte
+	eachBox(data, func(typ string, moof []byte) bool {
+		if typ != "moof" {
+			return true
+		}
+		eachBox(moof, func(typ string, traf []byte) bool {
+			if typ != "traf" {
+				return true
+			}
+			var id uint32
+			eachBox(traf, func(typ string, p []byte) bool {
+				if typ == "tfhd" && len(p) >= 8 {
+					id = binary.BigEndian.Uint32(p[4:8])
+				}
+				return true
+			})
+			if id == audioID {
+				eachBox(traf, func(typ string, p []byte) bool {
+					if typ == "tfdt" {
+						tfdt = p
+					}
+					return true
+				})
+			}
+			return true
+		})
+		return true
+	})
+	if len(tfdt) < 8 {
+		return errors.New("AAC decode time not found")
+	}
+	if tfdt[0] == 1 {
+		if len(tfdt) < 12 {
+			return errors.New("short AAC decode time")
+		}
+		binary.BigEndian.PutUint64(tfdt[4:12], firstSample)
+	} else {
+		if firstSample > uint64(^uint32(0)) {
+			return errors.New("AAC decode time overflows")
+		}
+		binary.BigEndian.PutUint32(tfdt[4:8], uint32(firstSample))
+	}
+	return nil
+}
+
 // eachBox iterates top-level boxes in buf: typ is the fourcc, payload excludes
 // the 8-byte (or 16-byte largesize) header. Malformed tails stop iteration.
 func eachBox(buf []byte, fn func(typ string, payload []byte) bool) {

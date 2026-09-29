@@ -121,6 +121,41 @@ func TestShiftSegmentTimeline(t *testing.T) {
 	}
 }
 
+func TestAlignAACFrameTimeline(t *testing.T) {
+	handler := make([]byte, 12)
+	copy(handler[8:12], "soun")
+	moov := mkbox("moov", bytes.Join([][]byte{
+		mkbox("trak", bytes.Join([][]byte{tkhdV0(1), mkbox("mdia", mdhdV0(90000))}, nil)),
+		mkbox("trak", bytes.Join([][]byte{tkhdV1(2), mkbox("mdia", bytes.Join([][]byte{mdhdV1(48000), mkbox("hdlr", handler)}, nil))}, nil)),
+	}, nil))
+	for _, version := range []int{0, 1} {
+		t.Run(string(rune('0'+version)), func(t *testing.T) {
+			var audio []byte
+			if version == 0 {
+				audio = tfdtV0(480000)
+			} else {
+				audio = tfdtV1(480000)
+			}
+			data := bytes.Join([][]byte{moov, mkbox("moof", bytes.Join([][]byte{
+				mkbox("traf", bytes.Join([][]byte{tfhd(1), tfdtV1(900000)}, nil)),
+				mkbox("traf", bytes.Join([][]byte{tfhd(2), audio}, nil)),
+			}, nil))}, nil)
+			if err := alignAACFrameTimeline(data, 469*1024); err != nil {
+				t.Fatal(err)
+			}
+			if got := binary.BigEndian.Uint32(data[len(data)-4:]); got != 469*1024 {
+				t.Fatalf("v%d decode time = %d", version, got)
+			}
+			if !bytes.Contains(data, tfdtV1(900000)) {
+				t.Fatal("video decode time changed")
+			}
+		})
+	}
+	if err := alignAACFrameTimeline(mkbox("ftyp", []byte("isom")), 0); err == nil {
+		t.Fatal("expected missing audio track error")
+	}
+}
+
 func TestShiftSegmentTimelineRejectsV0Overflow(t *testing.T) {
 	moov := mkbox("moov", mkbox("trak", bytes.Join([][]byte{
 		tkhdV0(1), mkbox("mdia", mdhdV0(90000)),
