@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -581,7 +582,7 @@ func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceU
 	// of video but only 10 seconds of audio, overlapping the following segment.
 	bsf += fmt.Sprintf(",noise=drop='lt(pts*tb,0)+gte(pts*tb,%s)'", seconds(duration))
 	args := []string{
-		"-hide_banner", "-nostdin", "-loglevel", "error", "-xerror",
+		"-hide_banner", "-nostdin", "-loglevel", "warning", "-xerror",
 		"-abort_on", "empty_output+empty_output_stream",
 		"-rw_timeout", "15000000", "-protocol_whitelist", "http,https,tcp,tls,crypto",
 		"-probesize", "1048576", "-analyzeduration", "1000000",
@@ -614,10 +615,13 @@ func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceU
 		"-frag_duration", strconv.FormatInt(int64((duration+1)*1e6), 10),
 		"-f", "mp4", "pipe:1",
 	}
+	stderr := &stderrTail{}
 	cmd := exec.CommandContext(ctx, m.ffmpeg, args...)
 	cmd.Stdout = out
-	// FFmpeg diagnostics can contain signed source URLs. Do not retain or log them.
-	cmd.Stderr = io.Discard
+	// FFmpeg diagnostics can contain signed source URLs, so retain a bounded
+	// tail in memory and redact it before anything reaches a log. A 326 ms,
+	// zero-byte conversion failure previously left no trace at all.
+	cmd.Stderr = stderr
 	cmd.WaitDelay = 2 * time.Second
 	err := cmd.Run()
 	if out.exceeded {
@@ -627,7 +631,14 @@ func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceU
 		return nil, ctx.Err()
 	}
 	if err != nil {
-		return nil, errors.New("playback segment conversion failed")
+		detail := sanitizedConverterDetail(string(stderr.buf), sourceURL)
+		if stderr.truncated {
+			detail = "[earlier output omitted] " + detail
+		}
+		if detail == "" {
+			return nil, fmt.Errorf("playback segment conversion failed: %w", err)
+		}
+		return nil, fmt.Errorf("playback segment conversion failed: %w: %s", err, detail)
 	}
 	if len(out.data) == 0 || !validFragmentedMP4(out.data) {
 		return nil, errors.New("playback encoder returned invalid fragmented MP4")
@@ -636,6 +647,58 @@ func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceU
 		return nil, fmt.Errorf("playback segment timeline: %w", err)
 	}
 	return out.data, nil
+}
+
+const (
+	// Keep enough trailer to see the fatal reason without unbounded memory.
+	ffmpegStderrLimit = 16 << 10
+	// Failure details are logged, so bound them to one readable line.
+	ffmpegDetailLimit = 1024
+)
+
+var (
+	// Whole http(s) URLs may embed signed paths or queries; drop them.
+	ffmpegURLPattern = regexp.MustCompile(`(?i)https?://\S+`)
+	// Capability parameters can also appear without a URL prefix.
+	ffmpegSecretPattern = regexp.MustCompile(`(?i)\b(sign|token|api_?key|access_?key|authorization|cookie|password)=[^\s&'"]*`)
+)
+
+// stderrTail retains only the most recent ffmpeg diagnostics. Raw stderr can
+// contain signed source URLs, so callers must redact it before logging.
+type stderrTail struct {
+	buf       []byte
+	truncated bool
+}
+
+func (s *stderrTail) Write(p []byte) (int, error) {
+	s.buf = append(s.buf, p...)
+	if len(s.buf) > ffmpegStderrLimit {
+		n := copy(s.buf, s.buf[len(s.buf)-ffmpegStderrLimit:])
+		s.buf = s.buf[:n]
+		s.truncated = true
+	}
+	return len(p), nil
+}
+
+// sanitizedConverterDetail turns ffmpeg stderr into one log-safe line. Signed
+// player capabilities must never leave here, so the exact source URL, any
+// http(s) URL, and common secret parameters are redacted first.
+func sanitizedConverterDetail(stderr, sourceURL string) string {
+	text := stderr
+	if sourceURL != "" {
+		text = strings.ReplaceAll(text, sourceURL, "<source>")
+	}
+	text = ffmpegSecretPattern.ReplaceAllString(text, "$1=<redacted>")
+	text = ffmpegURLPattern.ReplaceAllString(text, "<url>")
+	text = strings.Join(strings.Fields(text), " ")
+	if text == "" {
+		return ""
+	}
+	if len(text) > ffmpegDetailLimit {
+		// Keep the tail: ffmpeg prints the fatal reason last.
+		text = "…" + text[len(text)-ffmpegDetailLimit:]
+	}
+	return text
 }
 
 // validFragmentedMP4 checks the leading boxes of one self-initialized

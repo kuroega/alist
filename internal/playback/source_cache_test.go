@@ -114,6 +114,35 @@ func TestSourceCacheRejectsTruncatedChunk(t *testing.T) {
 	store.release(entry)
 }
 
+func TestSourceCacheRetriesTransientChunkFailure(t *testing.T) {
+	data := []byte("0123456789abcdef")
+	var attempts atomic.Int32
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) <= 2 {
+			http.Error(w, "temporary upstream failure", http.StatusBadGateway)
+			return
+		}
+		http.ServeContent(w, r, "source.mkv", time.Time{}, bytes.NewReader(data))
+	}))
+	defer origin.Close()
+	store, err := newSourceStore(t.TempDir(), 64, int64(len(data)), origin.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := store.acquire("movie:retry", origin.URL, int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.release(entry)
+	buf := make([]byte, len(data))
+	if n, err := entry.ReadAt(context.Background(), buf, 0); err != nil || n != len(data) || !bytes.Equal(buf, data) {
+		t.Fatalf("transient source failure was not retried: n=%d err=%v", n, err)
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("source attempts = %d, want 3", got)
+	}
+}
+
 func TestSourceCacheEvictsInactiveRevision(t *testing.T) {
 	data := bytes.Repeat([]byte("x"), 16)
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

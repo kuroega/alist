@@ -270,6 +270,75 @@ func TestRenumberFragmentsProducesContiguousSequence(t *testing.T) {
 	}
 }
 
+func TestSanitizedConverterDetailRedactsCapabilities(t *testing.T) {
+	source := "http://127.0.0.1:8080/p/movie.mkv?sign=abc123&d=1"
+	stderr := strings.Join([]string{
+		source + ": Server returned 403 Forbidden",
+		"Error while decoding stream #0:1: Invalid data found when processing input",
+		"Opening 'http://upstream.example/private/movie.mkv?token=deadbeef' for reading",
+		"sign=standalone-secret",
+	}, "\n")
+	detail := sanitizedConverterDetail(stderr, source)
+	for _, secret := range []string{"abc123", "deadbeef", "standalone-secret", "/p/movie.mkv", "upstream.example"} {
+		if strings.Contains(detail, secret) {
+			t.Fatalf("capability %q leaked into converter detail: %q", secret, detail)
+		}
+	}
+	if !strings.Contains(detail, "403 Forbidden") || !strings.Contains(detail, "Invalid data found") {
+		t.Fatalf("converter detail lost the failure cause: %q", detail)
+	}
+	if strings.ContainsAny(detail, "\n\r") {
+		t.Fatalf("converter detail must be a single log line: %q", detail)
+	}
+}
+
+func TestEncodeSurfacesSanitizedFFmpegFailure(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "not a media container")
+	}))
+	defer server.Close()
+	m := NewManager(Config{FFmpeg: ffmpeg})
+	defer m.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err = m.encode(ctx, cancel, server.URL+"/movie.mkv?sign=capability-token", "h264", 0, 0, 6)
+	if err == nil {
+		t.Fatal("expected ffmpeg to fail on a non-media source")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "playback segment conversion failed") {
+		t.Fatalf("conversion failure was not reported: %v", err)
+	}
+	if strings.Contains(msg, "capability-token") {
+		t.Fatalf("signed capability leaked into encoder error: %v", err)
+	}
+	// The captured stderr must add detail beyond the exit status; without it
+	// the original failure was indistinguishable from any other nonzero exit.
+	if len(msg) <= len("playback segment conversion failed: exit status 1")+2 {
+		t.Fatalf("ffmpeg stderr detail was not captured: %q", msg)
+	}
+}
+
+func TestStderrTailKeepsRecentOutputBounded(t *testing.T) {
+	var tail stderrTail
+	for i := 0; i < 5000; i++ {
+		fmt.Fprintf(&tail, "warning line %d\n", i)
+	}
+	if len(tail.buf) > ffmpegStderrLimit {
+		t.Fatalf("stderr tail grew to %d bytes", len(tail.buf))
+	}
+	if !tail.truncated {
+		t.Fatal("expected truncation to be reported")
+	}
+	if !strings.Contains(string(tail.buf), "warning line 4999") {
+		t.Fatalf("tail dropped the most recent output: %q", tail.buf)
+	}
+}
+
 func playbackSessionFixture(m *Manager, id, key string) *Session {
 	ctx, cancel := context.WithCancel(m.ctx)
 	identity := key

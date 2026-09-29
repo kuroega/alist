@@ -23,6 +23,9 @@ const (
 	sourceCacheVersion      = 1
 	sourceChunkTimeout      = time.Minute
 	sourcePrefetchThreshold = 2 << 20
+	// A transient upstream failure must not fail the whole segment.
+	sourceChunkAttempts = 3
+	sourceChunkBackoff  = 200 * time.Millisecond
 )
 
 var errSourceCacheFull = errors.New("playback source cache is full")
@@ -434,7 +437,34 @@ func (e *sourceEntry) setSourceURL(sourceURL string) {
 	e.mu.Unlock()
 }
 
+// fetchChunk retries transient upstream failures before giving up. Without
+// this, one Quark hiccup makes the source stream end short, ffmpeg exits with
+// `-xerror`, and the player sees a failed segment even though a retry seconds
+// later succeeds. A chunk that exhausted its own timeout is not retried:
+// another minute would only consume the encode budget.
 func (e *sourceEntry) fetchChunk(parent context.Context, index int64, destination string) error {
+	var err error
+	for attempt := 1; attempt <= sourceChunkAttempts; attempt++ {
+		err = e.fetchChunkOnce(parent, index, destination)
+		if err == nil || parent.Err() != nil {
+			return err
+		}
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return err
+		}
+		if attempt == sourceChunkAttempts {
+			break
+		}
+		select {
+		case <-parent.Done():
+			return parent.Err()
+		case <-time.After(time.Duration(attempt) * sourceChunkBackoff):
+		}
+	}
+	return err
+}
+
+func (e *sourceEntry) fetchChunkOnce(parent context.Context, index int64, destination string) error {
 	length := e.record.chunkLength(index, e.store.chunkBytes)
 	start := index * e.store.chunkBytes
 	e.mu.Lock()
