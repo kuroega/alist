@@ -450,6 +450,28 @@ func TestEncodedSegmentsExcludeSeekPreroll(t *testing.T) {
 			if err := json.Unmarshal(output, &probe); err != nil {
 				t.Fatal(err)
 			}
+			// Each fresh AAC encoder adds a priming frame. Its padding must
+			// not extend the audio track beyond this playlist interval: even
+			// a small excess here accumulates across a long VOD playlist.
+			var streams struct {
+				Streams []struct {
+					Index    int    `json:"index"`
+					Duration string `json:"duration"`
+				} `json:"streams"`
+			}
+			streamJSON, err := exec.CommandContext(ctx, ffprobe, "-v", "error", "-show_entries", "stream=index,duration", "-of", "json", segment).Output()
+			if err != nil || json.Unmarshal(streamJSON, &streams) != nil {
+				t.Fatalf("probe encoded streams: %v %s", err, streamJSON)
+			}
+			for _, stream := range streams.Streams {
+				if stream.Index != 1 {
+					continue
+				}
+				audioEnd, err := strconv.ParseFloat(stream.Duration, 64)
+				if err != nil || math.Abs(audioEnd-end) > 0.003 {
+					t.Fatalf("audio duration %s does not match playlist interval %v", stream.Duration, end-start)
+				}
+			}
 			frames := 0
 			for _, packet := range probe.Packets {
 				if packet.Stream != 0 {

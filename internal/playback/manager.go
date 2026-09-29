@@ -540,7 +540,12 @@ func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceU
 		"-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000", "-threads:a", "1",
 		// Trim negative seek preroll and fill any initial audio gap against
 		// video's origin; never reset audio independently with PTS-STARTPTS.
-		"-af", "aresample=48000:async=1:first_pts=0", "-filter_threads", "1",
+		// The AAC encoder adds one 1024-sample priming frame on every fresh
+		// segment. With fragmented MP4 this frame extends the audio track past
+		// EXTINF, accumulating overlap against the copied video on playback.
+		// Limit the filter output by the encoder's priming duration so the
+		// emitted audio track ends at the indexed segment boundary.
+		"-af", fmt.Sprintf("aresample=48000:async=1:first_pts=0,atrim=duration=%s", seconds(math.Max(0, duration-1024.0/48000))), "-filter_threads", "1",
 		"-max_muxing_queue_size", "1024", "-avoid_negative_ts", "make_non_negative",
 		// Fragmented MP4 with per-segment init: players use ffmpeg-written
 		// decoder configuration instead of demuxer-built config from a

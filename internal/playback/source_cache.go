@@ -582,7 +582,11 @@ func (r *sourceStream) Read(p []byte) (int, error) {
 	r.offset += int64(n)
 	r.remaining -= int64(n)
 	r.read += int64(n)
-	if r.read >= sourcePrefetchThreshold && r.prefetched != index+1 {
+	// A seek may land near the end of a cached chunk. Prefetch by
+	// distance to the next chunk, not bytes read on this connection:
+	// waiting for two MB of reads can leave no lead time at all.
+	chunkEnd := min((index+1)*r.entry.store.chunkBytes, r.entry.record.size)
+	if chunkEnd-r.offset <= sourcePrefetchThreshold && r.prefetched != index+1 && r.remaining > 0 {
 		r.prefetched = index + 1
 		r.entry.prefetch(r.ctx, index+1)
 	}
