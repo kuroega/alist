@@ -1,6 +1,7 @@
 import CoreText
 import Combine
 import Foundation
+import OSLog
 import UIKit
 import VLCKit
 
@@ -37,6 +38,10 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
     private var lastObservedTime: TimeInterval = 0
 #if DEBUG
     private var nextStatisticsLogTime: TimeInterval = 0
+    private var statisticsAnchor: (uptime: TimeInterval, media: TimeInterval)?
+    // `print` only reaches stdout, so it is absent from `log stream`. Emit
+    // through the unified log to capture playback evidence on the Simulator.
+    private static let statisticsLogger = Logger(subsystem: "com.alist.tv", category: "VLCKitStats")
 #endif
 
     override init() {
@@ -85,6 +90,7 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
         }
 #if DEBUG
         nextStatisticsLogTime = 0
+        statisticsAnchor = nil
 #endif
 
         guard let media = VLCMedia(url: url) else {
@@ -349,7 +355,17 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
         guard now >= nextStatisticsLogTime else { return }
         nextStatisticsLogTime = now + 5
         let snapshot = collectDiagnostics()
-        print("VLCKitStats inputBitrate=\(snapshot.inputBitrate) demuxBitrate=\(snapshot.demuxBitrate) decodedVideo=\(snapshot.decodedVideo) displayedPictures=\(snapshot.displayedPictures) latePictures=\(snapshot.latePictures) lostPictures=\(snapshot.lostPictures) lostAudioBuffers=\(snapshot.lostAudioBuffers)")
+        if statisticsAnchor == nil {
+            statisticsAnchor = (now, snapshot.currentTime)
+        }
+        let anchor = statisticsAnchor ?? (now, snapshot.currentTime)
+        let wallSeconds = now - anchor.uptime
+        let mediaSeconds = snapshot.currentTime - anchor.media
+        // VLCKit exposes the master (audio) clock but not per-stream PTS, so
+        // wall-vs-media drift plus late/lost counters stand in for A-V offset.
+        // One compact line per sample keeps the `log stream` output greppable.
+        let line = "VLCKitStats mediaTime=\(snapshot.currentTime) wallSinceFirst=\(wallSeconds) mediaSinceFirst=\(mediaSeconds) wallMinusMedia=\(wallSeconds - mediaSeconds) audioDelayUs=\(mediaPlayer.currentAudioPlaybackDelay) position=\(mediaPlayer.position) inputBitrate=\(snapshot.inputBitrate) demuxBitrate=\(snapshot.demuxBitrate) decodedVideo=\(snapshot.decodedVideo) decodedAudio=\(snapshot.decodedAudio) displayedPictures=\(snapshot.displayedPictures) latePictures=\(snapshot.latePictures) lostPictures=\(snapshot.lostPictures) playedAudioBuffers=\(snapshot.playedAudioBuffers) lostAudioBuffers=\(snapshot.lostAudioBuffers) demuxDiscontinuity=\(snapshot.demuxDiscontinuity)"
+        Self.statisticsLogger.info("\(line, privacy: .public)")
     }
 #endif
 
