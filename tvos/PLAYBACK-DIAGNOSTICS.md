@@ -213,4 +213,18 @@ local proxy error: context canceled
 
 **部署：** VM 二进制更新为 sha256 `76c7335748e80a2720309f2a0de93dd9a1242945d7268a71ac8dce4781384b93`（2026-09-29），旧二进制备份于 `/opt/alist/alist.pre-extmap`，源缓存未动。
 
-**遗留：** `Manager.Init` 在会话内尚无分片时会编码分片 0 以取得 `moov`；从中间位置恢复播放时会多做一次分片 0 编码（源缓存热时约 0.2–0.5 s）。另外 `atrim` 只对齐了分片边界时长，未补偿分片起始的解码 priming；连续播放不受影响，但若要逐分片拼接解码，需 edit list 或丢弃解码 priming 才能完全无损。下一步应在 tvOS Simulator 上用实际样本复测开始/3 分钟/5 分钟的 A-V 偏差以确认端到端修复。
+**遗留：** `Manager.Init` 在会话内尚无分片时会编码分片 0 以取得 `moov`；从中间位置恢复播放时会多做一次分片 0 编码（源缓存热时约 0.2–0.5 s）。另外 `atrim` 只对齐了分片边界时长，未补偿分片起始的解码 priming；连续播放不受影响，但若要逐分片拼接解码，需 edit list 或丢弃解码 priming 才能完全无损。
+
+**客户端验证（2026-09-29）：** 用户已在 Mac 上手工复测，A/V 漂移消失，本问题确认修复。
+
+## 已定位：E20 "playback segment 14" 转换失败（2026-09-29）
+
+现象：日志中 E20 在 17:08:57 和 17:12:36 两次出现 `playback segment 14: 0 bytes in ~330ms err=playback segment conversion failed`；`encode()` 当时用 `cmd.Stderr = io.Discard`，失败原因完全不可见。
+
+定位：同一旧二进制在 17:41:07 对同一分片 14 成功编码（`2278553 bytes in 5.518s`），且此后（18:54–19:03）多文件连续播放全部成功。说明这是**首次播放冷缓存填充期间的瞬时上游分片读取失败**，不是编解码/封装缺陷：`sourceStore.fetchChunk` 当时对上游错误不做重试，`Range` 响应提前结束，ffmpeg 在 `-xerror` 下立即以非零退出并产出 0 字节。
+
+修复：
+- `encode()` 改为保留 16 KiB 的 ffmpeg stderr 尾部，经脱敏（源 URL、任意 http(s) URL、`sign/token/api_key/authorization/cookie/password` 参数）后随错误日志输出；ffmpeg 提到 `-loglevel warning`，保证根因可见且签名能力不泄漏。
+- `sourceStore.fetchChunk` 对瞬时失败最多重试 3 次（线性退避 200/400 ms）；分片自身 60 s 超时不重试，避免耗尽编码预算。
+
+验证：`go test ./internal/playback/...` 在 VM（ffmpeg 8.1.2）与本地均通过，新增脱敏、stderr 尾部边界、端到端错误可见性与分片重试测试。二进制更新为 sha256 `9f98c0394838f73ea70a344e65555a9167133c0ad519f5a1e72ba2fa1b9124b1`（2026-09-29），旧二进制备份于 `/opt/alist/alist.pre-retry`。
