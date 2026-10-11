@@ -44,3 +44,5 @@ tvos-backend.md
 
 # Local environment variables
 .env
+# Local device install script
+/tvos/scripts/install-keting.fish
