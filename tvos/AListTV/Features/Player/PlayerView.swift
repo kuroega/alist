@@ -107,7 +107,7 @@ struct FixturePlayerContainerView: View {
 #endif
 
 private struct ImmersivePlaybackStage<VideoContent: View>: View {
-    private enum FocusTarget: Hashable { case surface, close, playPause, rewind, timeline, forward, subtitles, audio, autoplay, diagnostics, panel, panelItem, appearance, appearanceFont, appearanceReset, appearanceBack, resume, startOver }
+    private enum FocusTarget: Hashable { case surface, close, playPause, rewind, timeline, forward, subtitles, audio, autoplay, diagnostics, panel, panelItem, appearance, appearanceFont, appearanceReset, appearanceBack, resume, startOver, coverFlow }
     private enum PresentedPanel: Equatable { case subtitles, audio, subtitleAppearance }
 
     @ObservedObject var coordinator: PlayerCoordinator
@@ -139,6 +139,12 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
     @State private var presentedPanel: PresentedPanel?
     @State private var scrubTarget: TimeInterval?
     @State private var touchScrubOrigin: TimeInterval?
+    @State private var panOriginFocus: FocusTarget??
+    @State private var isCoverFlowVisible = false
+    @State private var coverFlowIndex = 0
+    @State private var coverFlowPanOrigin: Int?
+    @State private var coverFlowPanMovedAt: Date?
+    @State private var coverFlowIdleTask: Task<Void, Never>?
     @FocusState private var focus: FocusTarget?
 
     private var hasSubtitleOptions: Bool {
@@ -150,12 +156,12 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
             Color.black
             MenuKeyCommandCapture(
                 onMenu: handleExitCommand,
-                onDirectional: { revealChrome(focus: .playPause) },
+                onDirectional: handleInterceptedDirection,
                 onSelect: handleSelectCommand,
                 onPlayPause: togglePlayback,
                 onPanChanged: handleTouchPanChanged,
                 onPanEnded: handleTouchPanEnded,
-                interceptsDirectional: !chromeVisible && presentedPanel == nil && diagnostics == nil,
+                interceptsDirectional: !chromeVisible && presentedPanel == nil && diagnostics == nil && !isCoverFlowVisible,
                 interceptsSelect: shouldInterceptSelect,
                 interceptsPlayPause: !chromeVisible && presentedPanel == nil && diagnostics == nil && coordinator.resumePrompt == nil
             )
@@ -165,7 +171,7 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
             SubtitleOverlayView(text: subtitleOverlay.activeText, appearance: subtitleAppearance)
             Color.clear
                 .contentShape(Rectangle())
-                .focusable(!chromeVisible || focus == .surface)
+                .focusable(!isCoverFlowVisible && (!chromeVisible || focus == .surface))
                 .focused($focus, equals: .surface)
                 .onMoveCommand(perform: handleMove)
 
@@ -179,6 +185,11 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
                     .disabled(presentedPanel != nil)
                     .opacity(presentedPanel != nil ? 0.3 : 1)
                     .transition(.opacity.combined(with: .offset(y: 24)))
+            }
+
+            if isCoverFlowVisible {
+                coverFlowLayer
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
             if let panel = presentedPanel {
@@ -208,6 +219,7 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
         .animation(.easeOut(duration: 0.3), value: chromeVisible)
         .animation(.spring(response: 0.4, dampingFraction: 0.86), value: presentedPanel)
         .animation(.easeOut(duration: 0.2), value: diagnostics != nil)
+        .animation(.spring(response: 0.5, dampingFraction: 0.88), value: isCoverFlowVisible)
         .onAppear {
             revealChrome(focus: coordinator.resumePrompt == nil ? .playPause : .resume)
             Task { @MainActor in
@@ -216,7 +228,14 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
                 focus = coordinator.resumePrompt == nil ? .playPause : .resume
             }
         }
-        .onDisappear { hideChromeTask?.cancel() }
+        .onDisappear {
+            hideChromeTask?.cancel()
+            coverFlowIdleTask?.cancel()
+        }
+        .onChange(of: coordinator.siblingMedia) { _, _ in
+            guard isCoverFlowVisible, let index = nowPlayingCoverIndex else { return }
+            coverFlowIndex = index
+        }
         .onChange(of: coordinator.resumePrompt) { _, prompt in
             if prompt != nil {
                 hideChromeTask?.cancel()
@@ -242,6 +261,28 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
         .onPlayPauseCommand { togglePlayback() }
         .onTapGesture { togglePlayback() }
         .onMoveCommand(perform: handleMove)
+    }
+
+    private var coverFlowLayer: some View {
+        Button(action: playSelectedCover) {
+            MediaCoverFlowPanel(
+                items: coordinator.siblingMedia,
+                state: coordinator.siblingMediaState,
+                selectedIndex: coverFlowIndex,
+                nowPlayingPath: coordinator.nowPlayingPath,
+                isPlaying: isPlaying,
+                folderTitle: coverFlowFolderTitle
+            )
+        }
+        .buttonStyle(CoverFlowSurfaceButtonStyle())
+        .focused($focus, equals: .coverFlow)
+        .onMoveCommand(perform: handleCoverFlowMove)
+        // Never more than half the screen, anchored to the bottom edge.
+        .containerRelativeFrame(.vertical, alignment: .bottom) { height, _ in height * 0.5 }
+        .frame(maxHeight: .infinity, alignment: .bottom)
+        .accessibilityIdentifier("player.cover-flow")
+        .accessibilityLabel(selectedCover?.name ?? "Folder")
+        .accessibilityValue(coordinator.siblingMedia.isEmpty ? "" : "\(coverFlowIndex + 1) of \(coordinator.siblingMedia.count)")
     }
 
     private var chromeBackdrop: some View {
@@ -742,13 +783,142 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
 
     private var shouldInterceptSelect: Bool {
         if focus == .timeline && scrubTarget != nil { return true }
-        return !chromeVisible && presentedPanel == nil && diagnostics == nil && coordinator.resumePrompt == nil
+        return !chromeVisible && presentedPanel == nil && diagnostics == nil && coordinator.resumePrompt == nil && !isCoverFlowVisible
     }
 
     private func togglePlayback() {
         guard coordinator.resumePrompt == nil else { return }
         isPlaying ? pause() : play()
-        revealChrome()
+        if isCoverFlowVisible {
+            scheduleCoverFlowIdleClose()
+        } else {
+            revealChrome()
+        }
+    }
+
+    // MARK: Cover Flow
+
+    private var selectedCover: AListObject? {
+        coordinator.siblingMedia.indices.contains(coverFlowIndex) ? coordinator.siblingMedia[coverFlowIndex] : nil
+    }
+
+    private var nowPlayingCoverIndex: Int? {
+        guard let path = coordinator.nowPlayingPath.map(AListPath.normalize) else { return nil }
+        return coordinator.siblingMedia.firstIndex { $0.virtualPath.map(AListPath.normalize) == path }
+    }
+
+    private var coverFlowFolderTitle: String {
+        guard let path = coordinator.nowPlayingPath else { return "Folder" }
+        let parent = AListPath.parent(of: path)
+        return parent == "/" ? "Home" : (parent.split(separator: "/").last.map(String.init) ?? "Folder")
+    }
+
+    private var canOpenCoverFlow: Bool {
+        presentedPanel == nil && coordinator.resumePrompt == nil && !coordinator.isTerminalFailure && coordinator.nowPlayingPath != nil
+    }
+
+    /// Down from the video or the bottom transport row opens the shelf; down
+    /// from the header or timeline keeps its usual focus movement.
+    private func opensCoverFlow(from target: FocusTarget?) -> Bool {
+        switch target {
+        case nil, .surface, .playPause, .rewind, .forward, .subtitles, .audio, .autoplay, .diagnostics: true
+        default: false
+        }
+    }
+
+    private func openCoverFlow() {
+        guard canOpenCoverFlow, !isCoverFlowVisible else { return }
+        coordinator.loadSiblingMedia()
+        coverFlowIndex = nowPlayingCoverIndex ?? 0
+        hideChromeTask?.cancel()
+        scrubTarget = nil
+        touchScrubOrigin = nil
+        chromeVisible = false
+        isCoverFlowVisible = true
+        focus = .coverFlow
+        scheduleCoverFlowIdleClose()
+    }
+
+    private func closeCoverFlow() {
+        guard isCoverFlowVisible else { return }
+        coverFlowIdleTask?.cancel()
+        coverFlowPanOrigin = nil
+        isCoverFlowVisible = false
+        focus = .surface
+    }
+
+    private func moveCoverFlow(to index: Int) {
+        let count = coordinator.siblingMedia.count
+        guard count > 0 else { return }
+        coverFlowIndex = min(max(0, index), count - 1)
+        scheduleCoverFlowIdleClose()
+    }
+
+    private func handleCoverFlowMove(_ direction: MoveCommandDirection) {
+        // A swipe already scrolled the shelf through the pan handler; ignore the
+        // focus engine's echo of that same gesture.
+        let isSwipeEcho = coverFlowPanOrigin != nil || coverFlowPanMovedAt.map { Date().timeIntervalSince($0) < 0.4 } == true
+        switch direction {
+        case .left: if !isSwipeEcho { moveCoverFlow(to: coverFlowIndex - 1) }
+        case .right: if !isSwipeEcho { moveCoverFlow(to: coverFlowIndex + 1) }
+        case .up: closeCoverFlow()
+        default: scheduleCoverFlowIdleClose()
+        }
+    }
+
+    /// Touch-surface swipes scroll the shelf continuously, one cover per stride.
+    private func handleCoverFlowPan(_ translation: CGPoint) {
+        if coverFlowPanOrigin == nil {
+            // Ignore the incidental touch of a clickpad press.
+            guard abs(translation.x) >= 24, abs(translation.x) >= abs(translation.y) else { return }
+            coverFlowPanOrigin = coverFlowIndex
+        }
+        guard let origin = coverFlowPanOrigin else { return }
+        let steps = Int((translation.x / 140).rounded(.towardZero))
+        if origin + steps != coverFlowIndex {
+            moveCoverFlow(to: origin + steps)
+            coverFlowPanMovedAt = Date()
+        }
+    }
+
+    private func handleCoverFlowPanEnded(_ translation: CGPoint) {
+        defer { coverFlowPanOrigin = nil }
+        if coverFlowPanOrigin == nil, translation.y < -80, abs(translation.y) > abs(translation.x) {
+            closeCoverFlow()
+        }
+    }
+
+    private func playSelectedCover() {
+        switch coordinator.siblingMediaState {
+        case .failed:
+            coordinator.loadSiblingMedia()
+            scheduleCoverFlowIdleClose()
+            return
+        default:
+            break
+        }
+        guard let item = selectedCover else { return }
+        closeCoverFlow()
+        coordinator.playSibling(item)
+        // Briefly surface the title so the switch is confirmed on screen.
+        revealChrome(focus: .playPause)
+    }
+
+    private func scheduleCoverFlowIdleClose() {
+        coverFlowIdleTask?.cancel()
+        coverFlowIdleTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(12))
+            guard !Task.isCancelled else { return }
+            closeCoverFlow()
+        }
+    }
+
+    private func handleInterceptedDirection(_ direction: MoveCommandDirection) {
+        if direction == .down, canOpenCoverFlow {
+            openCoverFlow()
+        } else {
+            revealChrome(focus: .playPause)
+        }
     }
 
     private func performSeek(_ seconds: TimeInterval) {
@@ -772,6 +942,11 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
     }
 
     private func handleTouchPanChanged(_ translation: CGPoint) {
+        if isCoverFlowVisible {
+            handleCoverFlowPan(translation)
+            return
+        }
+        if panOriginFocus == nil { panOriginFocus = .some(focus) }
         guard presentedPanel == nil, coordinator.resumePrompt == nil else { return }
         guard max(abs(translation.x), abs(translation.y)) >= 24 else { return }
         guard abs(translation.x) > abs(translation.y), isSeekable else { return }
@@ -790,6 +965,12 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
     }
 
     private func handleTouchPanEnded(_ translation: CGPoint) {
+        let originFocus = panOriginFocus ?? focus
+        panOriginFocus = nil
+        if isCoverFlowVisible {
+            handleCoverFlowPanEnded(translation)
+            return
+        }
         defer { touchScrubOrigin = nil }
         guard presentedPanel == nil, coordinator.resumePrompt == nil else { return }
         guard max(abs(translation.x), abs(translation.y)) >= 24 else { return }
@@ -803,6 +984,12 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
             direction = translation.x > 0 ? .right : .left
         } else {
             direction = translation.y > 0 ? .down : .up
+        }
+        if direction == .down, canOpenCoverFlow {
+            // Judge by where the swipe began: the focus engine may already have
+            // moved focus down into the transport row during the gesture.
+            if opensCoverFlow(from: originFocus) { openCoverFlow() }
+            return
         }
         handleMove(direction)
     }
@@ -836,6 +1023,11 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
             return
         }
 
+        if isCoverFlowVisible {
+            closeCoverFlow()
+            return
+        }
+
         let hasTransientUI = chromeVisible || presentedPanel != nil || diagnostics != nil
         guard hasTransientUI else {
             close()
@@ -850,6 +1042,11 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
     }
 
     private func handleMove(_ direction: MoveCommandDirection) {
+        guard !isCoverFlowVisible else { return }
+        if direction == .down, canOpenCoverFlow, opensCoverFlow(from: focus) {
+            openCoverFlow()
+            return
+        }
         revealChrome()
         guard presentedPanel == nil else { return }
         if focus == .timeline, isSeekable {
@@ -873,6 +1070,8 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
     }
 
     private func revealChrome(focus target: FocusTarget? = nil) {
+        // The shelf owns the screen while open; transport chrome stays tucked away.
+        guard !isCoverFlowVisible else { return }
         hideChromeTask?.cancel()
         chromeVisible = true
         if let target { focus = target }
@@ -1127,7 +1326,7 @@ private struct PlaybackDiagnosticsPanel: View {
 
 private struct MenuKeyCommandCapture: UIViewControllerRepresentable {
     let onMenu: () -> Void
-    let onDirectional: () -> Void
+    let onDirectional: (MoveCommandDirection) -> Void
     let onSelect: () -> Void
     let onPlayPause: () -> Void
     let onPanChanged: (CGPoint) -> Void
@@ -1167,7 +1366,7 @@ private struct MenuKeyCommandCapture: UIViewControllerRepresentable {
 
 private final class MenuKeyCommandController: UIViewController {
     var onMenu: () -> Void
-    var onDirectional: () -> Void
+    var onDirectional: (MoveCommandDirection) -> Void
     var onSelect: () -> Void
     var onPlayPause: () -> Void
     var onPanChanged: (CGPoint) -> Void
@@ -1177,7 +1376,7 @@ private final class MenuKeyCommandController: UIViewController {
     var interceptsPlayPause: Bool
     private var panGestureRecognizer: UIPanGestureRecognizer?
 
-    init(onMenu: @escaping () -> Void, onDirectional: @escaping () -> Void, onSelect: @escaping () -> Void, onPlayPause: @escaping () -> Void, onPanChanged: @escaping (CGPoint) -> Void, onPanEnded: @escaping (CGPoint) -> Void, interceptsDirectional: Bool, interceptsSelect: Bool, interceptsPlayPause: Bool) {
+    init(onMenu: @escaping () -> Void, onDirectional: @escaping (MoveCommandDirection) -> Void, onSelect: @escaping () -> Void, onPlayPause: @escaping () -> Void, onPanChanged: @escaping (CGPoint) -> Void, onPanEnded: @escaping (CGPoint) -> Void, interceptsDirectional: Bool, interceptsSelect: Bool, interceptsPlayPause: Bool) {
         self.onMenu = onMenu
         self.onDirectional = onDirectional
         self.onSelect = onSelect
@@ -1245,8 +1444,8 @@ private final class MenuKeyCommandController: UIViewController {
             onPlayPause()
             return
         }
-        if interceptsDirectional, presses.contains(where: Self.isDirectional) {
-            onDirectional()
+        if interceptsDirectional, let direction = presses.lazy.compactMap(Self.direction(of:)).first {
+            onDirectional(direction)
             return
         }
         super.pressesBegan(presses, with: event)
@@ -1265,13 +1464,24 @@ private final class MenuKeyCommandController: UIViewController {
         onMenu()
     }
 
-    private static func isDirectional(_ press: UIPress) -> Bool {
+    private static func direction(of press: UIPress) -> MoveCommandDirection? {
         switch press.type {
-        case .upArrow, .downArrow, .leftArrow, .rightArrow:
-            true
-        default:
-            false
+        case .upArrow: .up
+        case .downArrow: .down
+        case .leftArrow: .left
+        case .rightArrow: .right
+        default: nil
         }
     }
 }
 
+
+/// The Cover Flow shelf draws its own focus treatment, so its button wrapper
+/// adds none of the system lift or highlight.
+private struct CoverFlowSurfaceButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.92 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}

@@ -26,6 +26,18 @@ actor FixtureAListAPI: AListAPI {
                 AListObject(virtualPath: "/Sample.zh.srt", name: "Sample.zh.srt", size: 1_000, isDirectory: false),
                 AListObject(virtualPath: "/Unrelated.ass", name: "Unrelated.ass", size: 1_000, isDirectory: false)
             ]
+        } else if path == "/Shows" {
+            let episodes = ["Pilot", "The Long Night", "Northern Lights", "Signals", "Paper Moon", "Undertow", "Glass House", "Echoes", "Low Tide", "Homecoming"]
+            content = [AListObject(virtualPath: "/Shows/Episode.mp4", name: "Episode.mp4", size: 24_000_000, isDirectory: false, type: AListFileType.video.rawValue)]
+                + episodes.enumerated().map { index, title in
+                    let name = String(format: "S01E%02d %@.mkv", index + 1, title)
+                    return AListObject(virtualPath: "/Shows/\(name)", name: name, size: Int64(900_000_000 + index * 37_000_000), isDirectory: false, type: AListFileType.video.rawValue)
+                }
+                + [
+                    AListObject(virtualPath: "/Shows/01 Main Theme.flac", name: "01 Main Theme.flac", size: 32_000_000, isDirectory: false, type: AListFileType.audio.rawValue),
+                    AListObject(virtualPath: "/Shows/S01E01 Pilot.srt", name: "S01E01 Pilot.srt", size: 40_000, isDirectory: false),
+                    AListObject(virtualPath: "/Shows/notes.txt", name: "notes.txt", size: 2_000, isDirectory: false, type: AListFileType.text.rawValue)
+                ]
         } else {
             content = [AListObject(virtualPath: "\(path)/Episode.mp4", name: "Episode.mp4", size: 24_000_000, isDirectory: false, type: AListFileType.video.rawValue)]
         }

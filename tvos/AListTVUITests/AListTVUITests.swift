@@ -203,6 +203,53 @@ final class AListTVUITests: XCTestCase {
         XCTAssertTrue(app.buttons["player.done"].exists)
     }
 
+    func testCoverFlowSwitchesMediaInTheSameFolderWithoutLeavingPlayer() {
+        login(username: "alice")
+        focusAndSelect(app.buttons["browser.item./Shows"], direction: .right)
+        let episode = app.buttons["browser.item./Shows/S01E03 Northern Lights.mkv"]
+        XCTAssertTrue(episode.waitForExistence(timeout: 3))
+        focusSpatially(episode)
+        remote.press(.select)
+
+        let title = app.staticTexts["player.now-playing-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 3))
+        XCTAssertEqual(title.label, "S01E03 Northern Lights.mkv")
+        waitForPlaybackLabel("Pause", element: app.buttons["player.play-pause"])
+
+        // Down from the transport row opens the shelf on the playing item; only
+        // media files from the folder are listed (no subtitles or notes).
+        remote.press(.down)
+        let coverFlow = app.buttons["player.cover-flow"]
+        XCTAssertTrue(coverFlow.waitForExistence(timeout: 3))
+        waitForValue("5 of 12", element: coverFlow)
+        XCTAssertEqual(coverFlow.label, "S01E03 Northern Lights.mkv")
+        attachScreenshot(named: "cover-flow-open")
+
+        remote.press(.right)
+        remote.press(.right)
+        waitForValue("7 of 12", element: coverFlow)
+        XCTAssertEqual(coverFlow.label, "S01E05 Paper Moon.mkv")
+        attachScreenshot(named: "cover-flow-browsed")
+
+        remote.press(.select)
+        XCTAssertFalse(coverFlow.waitForExistence(timeout: 1))
+        let switched = expectation(for: NSPredicate(format: "label == 'S01E05 Paper Moon.mkv'"), evaluatedWith: title)
+        wait(for: [switched], timeout: 3)
+
+        // Menu dismisses the shelf but keeps the player open.
+        remote.press(.down)
+        XCTAssertTrue(coverFlow.waitForExistence(timeout: 3))
+        waitForValue("7 of 12", element: coverFlow)
+        remote.press(.left)
+        waitForValue("6 of 12", element: coverFlow)
+        attachScreenshot(named: "cover-flow-reopened")
+        remote.press(.menu)
+        XCTAssertFalse(coverFlow.waitForExistence(timeout: 1))
+        remote.press(.up)
+        XCTAssertTrue(app.buttons["player.done"].waitForExistence(timeout: 3))
+        XCTAssertEqual(title.label, "S01E05 Paper Moon.mkv")
+    }
+
     func testVisibleSeekButtonsMoveExactlyTenSeconds() {
         openFixturePlayer()
         let playPause = app.buttons["player.play-pause"]
@@ -556,6 +603,11 @@ final class AListTVUITests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.2)
         }
         XCTAssertTrue(element.hasFocus, "Could not focus \(element)")
+    }
+
+    private func waitForValue(_ value: String, element: XCUIElement) {
+        let matches = expectation(for: NSPredicate(format: "value == %@", value), evaluatedWith: element)
+        wait(for: [matches], timeout: 3)
     }
 
     private func waitForPlaybackLabel(_ label: String, element: XCUIElement) {

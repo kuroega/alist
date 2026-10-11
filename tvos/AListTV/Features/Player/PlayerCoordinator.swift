@@ -21,6 +21,7 @@ enum PlayableURLValidator {
 final class PlayerCoordinator: ObservableObject {
     enum State: Equatable { case idle, loading, playing, failed(message: String) }
     enum ExternalSubtitleDiscoveryState: Equatable { case idle, loading, loaded, failed(message: String) }
+    enum SiblingMediaState: Equatable { case idle, loading, loaded, failed(message: String) }
 
     @Published private(set) var state: State = .idle
     @Published var isPresented = false
@@ -37,6 +38,9 @@ final class PlayerCoordinator: ObservableObject {
         }
     }
     @Published private(set) var autoPlayFeedback: String?
+    /// Playable files that share the current item's folder, in queue order.
+    @Published private(set) var siblingMedia: [AListObject] = []
+    @Published private(set) var siblingMediaState: SiblingMediaState = .idle
     let subtitleOverlay = SubtitleOverlayModel()
 
     let controller: any PlayerControlling
@@ -68,6 +72,8 @@ final class PlayerCoordinator: ObservableObject {
     private var autoPlayGeneration = UUID()
     private var discoveryTask: Task<Void, Never>?
     private var subtitleSelectionTask: Task<Void, Never>?
+    private var siblingMediaTask: Task<Void, Never>?
+    private var siblingMediaFolder: String?
 
     init(
         api: any AListAPI,
@@ -111,6 +117,7 @@ final class PlayerCoordinator: ObservableObject {
         autoPlayFeedbackTask?.cancel()
         discoveryTask?.cancel()
         subtitleSelectionTask?.cancel()
+        siblingMediaTask?.cancel()
     }
 
     func play(object: AListObject) async {
@@ -134,6 +141,9 @@ final class PlayerCoordinator: ObservableObject {
         discoveryTask?.cancel()
         subtitleSelectionTask?.cancel()
         currentObject = object
+        if siblingMediaFolder != AListPath.parent(of: path) {
+            resetSiblingMedia()
+        }
         sessionID = UUID()
         let activeSession = sessionID
         refreshCount = 0
@@ -231,6 +241,47 @@ final class PlayerCoordinator: ObservableObject {
         externalSubtitleDiscoveryState = .idle
         subtitleSelectionError = nil
         subtitleSelection = .off
+        resetSiblingMedia()
+    }
+
+    /// Lists the playable siblings of the current item once per folder; switching
+    /// episodes inside the same folder reuses the loaded list.
+    func loadSiblingMedia() {
+        guard let path = currentObject?.virtualPath, !path.isEmpty else { return }
+        let parent = AListPath.parent(of: path)
+        if siblingMediaFolder == parent, siblingMediaState == .loaded || siblingMediaState == .loading { return }
+        siblingMediaTask?.cancel()
+        siblingMediaFolder = parent
+        siblingMediaState = .loading
+        siblingMediaTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let media = try await self.playableMedia(in: parent)
+                guard !Task.isCancelled, self.siblingMediaFolder == parent else { return }
+                self.siblingMedia = media
+                self.siblingMediaState = .loaded
+            } catch AListAPIError.unauthorized {
+                guard !Task.isCancelled, self.siblingMediaFolder == parent else { return }
+                await self.onUnauthorized()
+            } catch {
+                guard !Task.isCancelled, self.siblingMediaFolder == parent else { return }
+                self.siblingMediaState = .failed(message: "Unable to load this folder.")
+            }
+        }
+    }
+
+    /// Switches to another file from the current folder without leaving the player.
+    func playSibling(_ object: AListObject) {
+        guard let path = object.virtualPath, AListPath.normalize(path) != currentObject?.virtualPath.map(AListPath.normalize) else { return }
+        Task { await play(object: object) }
+    }
+
+    private func resetSiblingMedia() {
+        siblingMediaTask?.cancel()
+        siblingMediaTask = nil
+        siblingMediaFolder = nil
+        siblingMedia = []
+        siblingMediaState = .idle
     }
 
     func retryExternalSubtitleDiscovery() {
@@ -469,7 +520,13 @@ final class PlayerCoordinator: ObservableObject {
 
     private func nextMedia(after object: AListObject) async throws -> AListObject? {
         guard let currentPath = object.virtualPath, !currentPath.isEmpty else { return nil }
-        let parent = AListPath.parent(of: currentPath)
+        let media = try await playableMedia(in: AListPath.parent(of: currentPath))
+        guard let currentIndex = media.firstIndex(where: { $0.virtualPath == AListPath.normalize(currentPath) }) else { return nil }
+        let nextIndex = media.index(after: currentIndex)
+        return nextIndex < media.endIndex ? media[nextIndex] : nil
+    }
+
+    private func playableMedia(in parent: String) async throws -> [AListObject] {
         var pageNumber = 1
         var seenPaths = Set<String>()
         var siblings: [AListObject] = []
@@ -485,10 +542,7 @@ final class PlayerCoordinator: ObservableObject {
             pageNumber += 1
         }
 
-        let media = siblings.filter(Self.isPlayableMedia).sorted(by: Self.mediaComesBefore)
-        guard let currentIndex = media.firstIndex(where: { $0.virtualPath == AListPath.normalize(currentPath) }) else { return nil }
-        let nextIndex = media.index(after: currentIndex)
-        return nextIndex < media.endIndex ? media[nextIndex] : nil
+        return siblings.filter(Self.isPlayableMedia).sorted(by: Self.mediaComesBefore)
     }
 
     private static func mediaComesBefore(_ lhs: AListObject, _ rhs: AListObject) -> Bool {
