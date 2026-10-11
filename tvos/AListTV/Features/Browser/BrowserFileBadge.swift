@@ -71,18 +71,20 @@ struct BrowserFileBadge {
 
     var tint: Color {
         switch kind {
-        case .folder: .orange
-        case .video: .red
-        case .audio: .purple
-        case .image: .cyan
-        case .pdf: .red
-        case .archive, .presentation: .orange
-        case .spreadsheet: .green
-        case .code: .mint
-        case .text: .blue
-        case .document: .gray
+        case .folder: Color(red: 0.98, green: 0.72, blue: 0.36)
+        case .video: Color(red: 0.42, green: 0.66, blue: 1.0)
+        case .audio: Color(red: 0.78, green: 0.55, blue: 1.0)
+        case .image: Color(red: 0.40, green: 0.85, blue: 0.86)
+        case .pdf: Color(red: 1.0, green: 0.50, blue: 0.47)
+        case .archive, .presentation: Color(red: 0.96, green: 0.62, blue: 0.40)
+        case .spreadsheet: Color(red: 0.45, green: 0.85, blue: 0.56)
+        case .code: Color(red: 0.55, green: 0.88, blue: 0.75)
+        case .text: Color(red: 0.62, green: 0.74, blue: 1.0)
+        case .document: Color(white: 0.72)
         }
     }
+
+    var isPlayable: Bool { kind == .video || kind == .audio }
 
     var accessibilityDescription: String {
         [title, displayExtension].compactMap { $0 }.joined(separator: ", ")
@@ -119,46 +121,43 @@ struct BrowserFileBadgeView: View {
         case card
         case list
 
-        var symbolSize: CGFloat { self == .card ? 58 : 30 }
-        var extensionFont: Font { self == .card ? .caption.weight(.bold) : .caption2.weight(.bold) }
-        var cornerRadius: CGFloat { self == .card ? 22 : 16 }
+        var symbolSize: CGFloat { self == .card ? 64 : 32 }
+        var cornerRadius: CGFloat { self == .card ? 24 : 16 }
     }
 
     let badge: BrowserFileBadge
     let size: Size
+    var isFocused = false
 
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: size.cornerRadius, style: .continuous)
-                .fill(.ultraThinMaterial)
+                .fill(Color(white: isFocused ? 0.20 : 0.13))
             RoundedRectangle(cornerRadius: size.cornerRadius, style: .continuous)
                 .fill(
                     LinearGradient(
-                        colors: [badge.tint.opacity(0.46), badge.tint.opacity(0.14), .white.opacity(0.06)],
+                        colors: [badge.tint.opacity(isFocused ? 0.42 : 0.26), badge.tint.opacity(0.04)],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )
                 )
             RoundedRectangle(cornerRadius: size.cornerRadius, style: .continuous)
-                .stroke(.white.opacity(0.28), lineWidth: 1)
+                .strokeBorder(.white.opacity(isFocused ? 0.22 : 0.08), lineWidth: 1)
 
             Image(systemName: badge.systemImage)
-                .font(.system(size: size.symbolSize, weight: .medium))
+                .font(.system(size: size.symbolSize, weight: .regular))
                 .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(.white, badge.tint)
-                .shadow(color: badge.tint.opacity(0.42), radius: 12)
+                .foregroundStyle(badge.tint)
 
-            if let fileExtension = badge.displayExtension {
+            if size == .card, let fileExtension = badge.displayExtension {
                 Text(fileExtension)
-                    .font(size.extensionFont)
+                    .font(.system(size: 19, weight: .bold, design: .rounded))
+                    .tracking(1.2)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.65)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
-                    .background(.black.opacity(0.24), in: Capsule())
-                    .overlay(Capsule().stroke(.white.opacity(0.22), lineWidth: 1))
+                    .foregroundStyle(.white.opacity(0.55))
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                    .padding(size == .card ? 13 : 8)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 14)
             }
         }
         .accessibilityHidden(true)

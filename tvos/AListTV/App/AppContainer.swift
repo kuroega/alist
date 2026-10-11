@@ -12,6 +12,7 @@ final class AppContainer: ObservableObject {
     @Published private(set) var browserViewModel: BrowserViewModel?
     @Published private(set) var playerCoordinator: PlayerCoordinator?
     @Published private(set) var logoutError: String?
+    @Published private(set) var isRestoringSession = true
 
 
     let connectionViewModel: ConnectionViewModel
@@ -97,6 +98,7 @@ final class AppContainer: ObservableObject {
     func restoreSession() async {
         guard !didAttemptRestore else { return }
         didAttemptRestore = true
+        defer { isRestoringSession = false }
         await connectionViewModel.restore()
         activateConnectedSessionIfAvailable()
     }

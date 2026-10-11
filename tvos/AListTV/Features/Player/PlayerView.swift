@@ -107,7 +107,7 @@ struct FixturePlayerContainerView: View {
 #endif
 
 private struct ImmersivePlaybackStage<VideoContent: View>: View {
-    private enum FocusTarget: Hashable { case surface, close, playPause, rewind, timeline, forward, subtitles, audio, autoplay, diagnostics, panel, appearance, appearanceReset, appearanceBack, resume, startOver }
+    private enum FocusTarget: Hashable { case surface, close, playPause, rewind, timeline, forward, subtitles, audio, autoplay, diagnostics, panel, panelItem, appearance, appearanceFont, appearanceReset, appearanceBack, resume, startOver }
     private enum PresentedPanel: Equatable { case subtitles, audio, subtitleAppearance }
 
     @ObservedObject var coordinator: PlayerCoordinator
@@ -165,7 +165,7 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
             SubtitleOverlayView(text: subtitleOverlay.activeText, appearance: subtitleAppearance)
             Color.clear
                 .contentShape(Rectangle())
-                .focusable(focus == .surface)
+                .focusable(!chromeVisible || focus == .surface)
                 .focused($focus, equals: .surface)
                 .onMoveCommand(perform: handleMove)
 
@@ -176,7 +176,9 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
 
             if chromeVisible {
                 chrome
-                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    .disabled(presentedPanel != nil)
+                    .opacity(presentedPanel != nil ? 0.3 : 1)
+                    .transition(.opacity.combined(with: .offset(y: 24)))
             }
 
             if let panel = presentedPanel {
@@ -185,14 +187,16 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
                         .transition(.opacity.combined(with: .scale(scale: 0.96)))
                 } else {
                     trackPanel(panel)
-                        .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                        .transition(.opacity.combined(with: .move(edge: .trailing)))
                 }
             }
 
             if let diagnostics {
                 PlaybackDiagnosticsPanel(snapshot: diagnostics, close: { setDiagnosticsEnabled(false) })
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                    .padding(46)
+                    .padding(.top, 150)
+                    .padding(.trailing, 88)
+                    .transition(.opacity)
             }
 
             if case let .failed(message) = coordinator.state {
@@ -201,8 +205,9 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
         }
         .ignoresSafeArea()
         .defaultFocus($focus, coordinator.resumePrompt == nil ? .playPause : .resume)
-        .animation(.easeOut(duration: 0.22), value: chromeVisible)
-        .animation(.easeOut(duration: 0.2), value: presentedPanel != nil)
+        .animation(.easeOut(duration: 0.3), value: chromeVisible)
+        .animation(.spring(response: 0.4, dampingFraction: 0.86), value: presentedPanel)
+        .animation(.easeOut(duration: 0.2), value: diagnostics != nil)
         .onAppear {
             revealChrome(focus: coordinator.resumePrompt == nil ? .playPause : .resume)
             Task { @MainActor in
@@ -240,11 +245,21 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
     }
 
     private var chromeBackdrop: some View {
-        LinearGradient(
-            colors: [.black.opacity(0.68), .clear, .black.opacity(0.78)],
-            startPoint: .top,
-            endPoint: .bottom
-        )
+        ZStack {
+            LinearGradient(
+                stops: [
+                    .init(color: .black.opacity(0.72), location: 0),
+                    .init(color: .black.opacity(0.0), location: 0.28),
+                    .init(color: .black.opacity(0.0), location: 0.52),
+                    .init(color: .black.opacity(0.86), location: 1)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            if presentedPanel != nil || coordinator.isTerminalFailure {
+                Color.black.opacity(0.35)
+            }
+        }
         .allowsHitTesting(false)
     }
 
@@ -252,68 +267,60 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
         VStack(spacing: 0) {
             header
             Spacer(minLength: 24)
-            centerTransport
-            Spacer(minLength: 24)
             transportDock
         }
-        .padding(.horizontal, 74)
-        .padding(.vertical, 50)
+        .padding(.horizontal, 88)
+        .padding(.top, 60)
+        .padding(.bottom, 64)
     }
 
     private var header: some View {
-        HStack(spacing: 22) {
+        HStack(alignment: .center, spacing: 28) {
             Button(action: close) {
-                Image(systemName: "chevron.backward")
-                    .font(.title3.weight(.semibold))
-                    .frame(width: 60, height: 60)
+                Label("Done", systemImage: "chevron.backward")
             }
-            .buttonStyle(.plain)
+            .buttonStyle(GlassIconButtonStyle(diameter: 64))
             .focused($focus, equals: .close)
             .accessibilityIdentifier("player.done")
             .accessibilityLabel("Done")
 
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: 6) {
                 Text(coordinator.nowPlayingTitle)
-                    .font(.title3.weight(.semibold))
+                    .font(.system(size: 40, weight: .bold))
                     .lineLimit(1)
                     .accessibilityIdentifier("player.now-playing-title")
-                Text(nowPlayingDetail)
-                    .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.68))
-                    .lineLimit(1)
+                if let detail = nowPlayingDetail {
+                    Text(detail)
+                        .font(.system(size: 24, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.6))
+                        .lineLimit(1)
+                }
             }
             Spacer()
             if isBuffering || coordinator.state == .loading {
-                HStack(spacing: 10) {
+                HStack(spacing: 14) {
                     ProgressView().controlSize(.small)
                     Text(isBuffering ? "Buffering" : "Loading")
                 }
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(.white.opacity(0.78))
+                .font(.system(size: 24, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.85))
+                .padding(.horizontal, 24)
+                .frame(height: 56)
+                .background(.ultraThinMaterial, in: Capsule())
+                .transition(.opacity)
             }
         }
-    }
-
-    private var centerTransport: some View {
-        Button(action: togglePlayback) {
-            Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                .font(.system(size: 34, weight: .bold))
-                .frame(width: 106, height: 106)
-                .background(.white.opacity(0.18), in: Circle())
-                .overlay(Circle().stroke(.white.opacity(0.28), lineWidth: 1))
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("player.play-pause")
-        .accessibilityLabel(isPlaying ? "Pause" : "Play")
+        .animation(.easeOut(duration: 0.2), value: isBuffering)
     }
 
     private var transportDock: some View {
-        VStack(spacing: 22) {
+        VStack(alignment: .leading, spacing: 30) {
             if let prompt = coordinator.resumePrompt {
                 resumePromptView(prompt)
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
             timeline
-            HStack(spacing: 16) {
+            HStack(spacing: 26) {
                 Button(action: { performSeek(currentTime - 10) }) {
                     Label("Back 10 seconds", systemImage: "gobackward.10")
                 }
@@ -323,8 +330,12 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
 
                 Button(action: togglePlayback) {
                     Label(isPlaying ? "Pause" : "Play", systemImage: isPlaying ? "pause.fill" : "play.fill")
+                        .contentTransition(.symbolEffect(.replace))
                 }
+                .buttonStyle(GlassIconButtonStyle(diameter: 92))
                 .focused($focus, equals: .playPause)
+                .accessibilityIdentifier("player.play-pause")
+                .accessibilityLabel(isPlaying ? "Pause" : "Play")
 
                 Button(action: { performSeek(currentTime + 10) }) {
                     Label("Forward 10 seconds", systemImage: "goforward.10")
@@ -336,101 +347,121 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
                 Spacer(minLength: 20)
 
                 if hasSubtitleOptions {
-                    Button(action: { openPanel(.subtitles) }) { Label("Subtitles", systemImage: "captions.bubble") }
+                    Button(action: { openPanel(.subtitles) }) { Label("Subtitles", systemImage: isOffSelected ? "captions.bubble" : "captions.bubble.fill") }
+                        .buttonStyle(GlassIconButtonStyle(isActive: !isOffSelected))
                         .focused($focus, equals: .subtitles)
                         .accessibilityIdentifier("player.subtitles")
                 }
                 if audioTracks.count > 1 {
-                    Button(action: { openPanel(.audio) }) { Label("Audio", systemImage: "speaker.wave.2") }
+                    Button(action: { openPanel(.audio) }) { Label("Audio", systemImage: "speaker.wave.2.fill") }
                         .focused($focus, equals: .audio)
                         .accessibilityIdentifier("player.audio")
                         .accessibilityValue(selectedAudioTitle)
                 }
-                HStack(spacing: 10) {
-                    Button(action: coordinator.toggleAutoPlay) {
-                        Label("Autoplay next", systemImage: "repeat.1")
-                    }
-                    .focused($focus, equals: .autoplay)
-                    .accessibilityIdentifier("player.autoplay-toggle")
-                    .accessibilityLabel("Autoplay next")
-                    .accessibilityValue(autoPlayAccessibilityValue)
-                    AutoplayFeedbackView(coordinator: coordinator)
+                Button(action: coordinator.toggleAutoPlay) {
+                    Label("Autoplay next", systemImage: "forward.end.alt.fill")
                 }
+                .buttonStyle(GlassIconButtonStyle(isActive: coordinator.isAutoPlayEnabled))
+                .overlay(alignment: .top) {
+                    AutoplayFeedbackView(coordinator: coordinator)
+                        .offset(y: -58)
+                }
+                .focused($focus, equals: .autoplay)
+                .accessibilityIdentifier("player.autoplay-toggle")
+                .accessibilityLabel("Autoplay next")
+                .accessibilityValue(autoPlayAccessibilityValue)
+
                 Button(action: { setDiagnosticsEnabled(diagnostics == nil) }) { Label("Diagnostics", systemImage: "waveform.path.ecg") }
+                    .buttonStyle(GlassIconButtonStyle(isActive: diagnostics != nil))
                     .focused($focus, equals: .diagnostics)
                     .accessibilityIdentifier("player.diagnostics-toggle")
                     .accessibilityLabel("Stats for Nerds")
             }
-            .labelStyle(.iconOnly)
-            .font(.title3)
-            .buttonStyle(.bordered)
+            .buttonStyle(GlassIconButtonStyle())
+            .focusSection()
         }
-        .padding(28)
-        .background(.black.opacity(0.34), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .animation(.easeOut(duration: 0.25), value: coordinator.resumePrompt != nil)
     }
 
     private func resumePromptView(_ prompt: PlaybackResumePrompt) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Continue playback?")
-                        .font(.headline)
-                    Text("Resume from \(PlaybackPresentation.resumeTimeText(prompt.position))")
-                        .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.72))
-                }
-                Spacer()
-                Text("\(prompt.secondsRemaining)s")
-                    .font(.title3.weight(.semibold).monospacedDigit())
-                    .foregroundStyle(.tint)
+        HStack(spacing: 36) {
+            ZStack {
+                Circle().stroke(.white.opacity(0.15), lineWidth: 5)
+                Circle()
+                    .trim(from: 0, to: CGFloat(prompt.secondsRemaining) / 5)
+                    .stroke(Theme.accent, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .animation(.linear(duration: 1), value: prompt.secondsRemaining)
+                Text("\(prompt.secondsRemaining)")
+                    .font(.system(size: 30, weight: .bold).monospacedDigit())
+                    .contentTransition(.numericText(countsDown: true))
             }
-            HStack(spacing: 14) {
+            .frame(width: 78, height: 78)
+            .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Resume from \(PlaybackPresentation.resumeTimeText(prompt.position))")
+                    .font(.system(size: 32, weight: .semibold))
+                    .monospacedDigit()
+                Text("Otherwise playback starts from the beginning.")
+                    .font(.system(size: 24))
+                    .foregroundStyle(.white.opacity(0.6))
+            }
+
+            Spacer(minLength: 24)
+
+            HStack(spacing: 22) {
                 Button("Continue") { coordinator.resumeFromSavedPosition() }
+                    .buttonStyle(PillButtonStyle(prominence: .primary))
                     .focused($focus, equals: .resume)
                     .accessibilityIdentifier("player.resume")
                 Button("Start from beginning") { coordinator.startFromBeginning() }
+                    .buttonStyle(PillButtonStyle())
                     .focused($focus, equals: .startOver)
                     .accessibilityIdentifier("player.start-over")
             }
-            .buttonStyle(.borderedProminent)
+            .focusSection()
         }
-        .padding(20)
-        .frame(maxWidth: 760, alignment: .leading)
-        .background(.black.opacity(0.82), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(.white.opacity(0.18), lineWidth: 1))
+        .padding(.horizontal, 32)
+        .padding(.vertical, 26)
+        .glassPanel(cornerRadius: 32)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("player.resume-prompt")
         .accessibilityValue("\(prompt.secondsRemaining) seconds remaining")
     }
 
     private var timeline: some View {
-        VStack(spacing: 10) {
+        let isFocused = focus == .timeline
+        return VStack(spacing: 14) {
+            PlaybackTimeline(
+                currentTime: displayTime,
+                bufferedTime: bufferedTime,
+                duration: duration,
+                isBuffering: isBuffering,
+                isScrubbing: scrubTarget != nil,
+                isFocused: isFocused,
+                scrubLabel: scrubTarget.map { timeText($0) }
+            )
+            .frame(height: 30)
+            .frame(maxWidth: .infinity)
+            .accessibilityElement(children: .ignore)
+            .accessibilityIdentifier("player.progress")
+
             HStack {
-                Text(timeText(displayTime)).monospacedDigit().accessibilityIdentifier("player.current-time")
+                Text(timeText(displayTime))
+                    .accessibilityIdentifier("player.current-time")
                 Spacer()
-                if scrubTarget != nil { Text("Seek to \(timeText(displayTime))").foregroundStyle(.tint) }
-                else { Text("−\(timeText(max(0, duration - currentTime))) remaining") }
+                Text("−\(timeText(max(0, duration - displayTime)))")
             }
-            PlaybackTimeline(currentTime: displayTime, bufferedTime: bufferedTime, duration: duration, isBuffering: isBuffering, isScrubbing: scrubTarget != nil)
-                .frame(height: 18)
-                .frame(maxWidth: .infinity)
-                .accessibilityElement(children: .ignore)
-                .accessibilityIdentifier("player.progress")
+            .font(.system(size: 24, weight: .semibold).monospacedDigit())
+            .foregroundStyle(.white.opacity(isFocused ? 0.95 : 0.7))
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .background(focus == .timeline ? .black.opacity(0.72) : .clear, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay {
-            if focus == .timeline {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(.white.opacity(0.42), lineWidth: 1)
-            }
-        }
-        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .contentShape(Rectangle())
         .focusable(isSeekable)
         .focused($focus, equals: .timeline)
         .focusEffectDisabled()
         .onTapGesture { commitScrub() }
+        .animation(Theme.focusSpring, value: isFocused)
         .accessibilityElement(children: .contain)
         .accessibilityAddTraits(.isButton)
         .accessibilityIdentifier("player.timeline")
@@ -441,59 +472,64 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
     @ViewBuilder
     private func trackPanel(_ panel: PresentedPanel) -> some View {
         let isSubtitles = panel == .subtitles
-        VStack(alignment: .leading, spacing: 18) {
-            HStack {
-                Text(isSubtitles ? "Subtitles" : "Audio")
-                    .font(.title2.weight(.bold))
-                Spacer()
+        VStack(alignment: .leading, spacing: 24) {
+            panelHeader(isSubtitles ? "Subtitles" : "Audio") {
                 Button("Close") { dismissPanel() }
+                    .buttonStyle(PillButtonStyle())
                     .accessibilityIdentifier("player.track-panel-close")
             }
-            .padding(.bottom, 8)
 
             ScrollView {
-                VStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
                     if isSubtitles {
                         Button {
                             presentedPanel = .subtitleAppearance
-                            focus = .appearanceReset
+                            focus = .appearanceFont
                         } label: {
-                            HStack {
-                                Label("Subtitle Appearance", systemImage: "textformat")
-                                Spacer()
-                                Text("\(subtitleAppearance.font.title) · \(subtitleAppearance.color.title) · \(subtitleAppearance.opacity.title)")
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(.horizontal, 18)
-                            .padding(.vertical, 14)
+                            PanelRowLabel(
+                                icon: "textformat",
+                                title: "Subtitle Appearance",
+                                detail: "\(subtitleAppearance.font.title) · \(subtitleAppearance.color.title) · \(subtitleAppearance.opacity.title)",
+                                trailingIcon: "chevron.right"
+                            )
                         }
-                        .buttonStyle(.plain)
-                        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .buttonStyle(RowButtonStyle())
+                        .focused($focus, equals: .appearance)
                         .accessibilityIdentifier("player.subtitle-appearance")
                         .accessibilityValue("\(subtitleAppearance.font.title), \(subtitleAppearance.color.title), \(subtitleAppearance.opacity.title)")
+
+                        sectionLabel("Track")
 
                         trackRow(title: "Off", detail: nil, selected: isOffSelected) {
                             Task { await coordinator.selectSubtitle(.off) }
                             dismissPanel()
                         }
                         ForEach(embeddedSubtitleTracks) { track in
-                            trackRow(title: trackLabel(track), detail: nil, selected: isEmbeddedSubtitleSelected(track.id)) {
+                            trackRow(title: trackLabel(track), detail: "Embedded", selected: isEmbeddedSubtitleSelected(track.id)) {
                                 Task { await coordinator.selectSubtitle(.embedded(trackID: track.id)) }
                                 dismissPanel()
                             }
                         }
                         if coordinator.externalSubtitleDiscoveryState == .loading {
-                            Label("Loading external subtitles…", systemImage: "arrow.triangle.2.circlepath")
-                                .foregroundStyle(.secondary).padding(.vertical, 14)
+                            HStack(spacing: 16) {
+                                ProgressView().controlSize(.small)
+                                Text("Looking for subtitle files…")
+                            }
+                            .font(.system(size: 26))
+                            .foregroundStyle(.white.opacity(0.6))
+                            .padding(.horizontal, 24)
+                            .padding(.vertical, 18)
                         }
                         ForEach(coordinator.externalSubtitles) { option in
-                            trackRow(title: option.title, detail: "External subtitle", selected: isExternalSubtitleSelected(option.id)) {
+                            trackRow(title: option.title, detail: "External file", selected: isExternalSubtitleSelected(option.id)) {
                                 Task { await coordinator.selectSubtitle(.external(fileID: option.id)) }
                                 dismissPanel()
                             }
                         }
                         if case .failed = coordinator.externalSubtitleDiscoveryState {
                             Button("Retry external subtitles") { coordinator.retryExternalSubtitleDiscovery() }
+                                .buttonStyle(PillButtonStyle())
+                                .padding(.top, 12)
                                 .accessibilityIdentifier("player.retry-subtitles")
                         }
                     } else {
@@ -505,164 +541,193 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
                         }
                     }
                 }
+                .padding(.vertical, 8)
             }
+            .scrollClipDisabled()
         }
-        .padding(36)
-        .frame(width: 760, height: 630, alignment: .topLeading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 32, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 32, style: .continuous).stroke(.white.opacity(0.16), lineWidth: 1))
-        .focused($focus, equals: .panel)
+        .padding(44)
+        .frame(width: 780)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .glassPanel(cornerRadius: 44)
+        .padding(40)
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .focusSection()
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier(isSubtitles ? "player.subtitle-panel" : "player.audio-panel")
     }
 
     private var subtitleAppearancePanel: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack {
-                Text("Subtitle Appearance")
-                    .font(.title2.weight(.bold))
-                Spacer()
-                Button("Reset") { updateSubtitleAppearance(.default) }
-                    .focused($focus, equals: .appearanceReset)
-                    .focusEffectDisabled()
-                    .accessibilityIdentifier("player.subtitle-appearance-reset")
-                Button("Back", action: dismissAppearance)
-                    .focused($focus, equals: .appearanceBack)
-                    .focusEffectDisabled()
-                    .accessibilityIdentifier("player.subtitle-appearance-close")
+        VStack(alignment: .leading, spacing: 30) {
+            panelHeader("Subtitle Appearance") {
+                HStack(spacing: 18) {
+                    Button("Reset") { updateSubtitleAppearance(.default) }
+                        .buttonStyle(PillButtonStyle())
+                        .focused($focus, equals: .appearanceReset)
+                        .accessibilityIdentifier("player.subtitle-appearance-reset")
+                    Button("Back", action: dismissAppearance)
+                        .buttonStyle(PillButtonStyle())
+                        .focused($focus, equals: .appearanceBack)
+                        .accessibilityIdentifier("player.subtitle-appearance-close")
+                }
             }
             .focusSection()
 
             subtitlePreview
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    appearanceSection("Font") {
-                        ForEach(SubtitleAppearance.FontChoice.allCases) { choice in
-                            appearanceChoice(
-                                title: choice.title,
-                                selected: subtitleAppearance.font == choice,
-                                identifier: "player.subtitle-font.\(choice.rawValue)"
-                            ) {
-                                updateSubtitleAppearance(SubtitleAppearance(font: choice, color: subtitleAppearance.color, opacity: subtitleAppearance.opacity))
-                            }
-                        }
+            appearanceSection("Font") {
+                ForEach(SubtitleAppearance.FontChoice.allCases) { choice in
+                    appearanceChoice(
+                        title: choice.title,
+                        selected: subtitleAppearance.font == choice,
+                        identifier: "player.subtitle-font.\(choice.rawValue)",
+                        focusTarget: subtitleAppearance.font == choice ? .appearanceFont : nil
+                    ) {
+                        updateSubtitleAppearance(SubtitleAppearance(font: choice, color: subtitleAppearance.color, opacity: subtitleAppearance.opacity))
                     }
-                    appearanceSection("Text Color") {
-                        ForEach(SubtitleAppearance.ColorChoice.allCases) { choice in
-                            appearanceChoice(
-                                title: choice.title,
-                                selected: subtitleAppearance.color == choice,
-                                identifier: "player.subtitle-color.\(choice.rawValue)",
-                                swatch: choice.previewColor
-                            ) {
-                                updateSubtitleAppearance(SubtitleAppearance(font: subtitleAppearance.font, color: choice, opacity: subtitleAppearance.opacity))
-                            }
-                        }
+                }
+            }
+            appearanceSection("Text Color") {
+                ForEach(SubtitleAppearance.ColorChoice.allCases) { choice in
+                    appearanceChoice(
+                        title: choice.title,
+                        selected: subtitleAppearance.color == choice,
+                        identifier: "player.subtitle-color.\(choice.rawValue)",
+                        swatch: choice.previewColor
+                    ) {
+                        updateSubtitleAppearance(SubtitleAppearance(font: subtitleAppearance.font, color: choice, opacity: subtitleAppearance.opacity))
                     }
-                    appearanceSection("Opacity") {
-                        ForEach(SubtitleAppearance.OpacityChoice.allCases) { choice in
-                            appearanceChoice(
-                                title: choice.title,
-                                selected: subtitleAppearance.opacity == choice,
-                                identifier: "player.subtitle-opacity.\(choice.rawValue)"
-                            ) {
-                                updateSubtitleAppearance(SubtitleAppearance(font: subtitleAppearance.font, color: subtitleAppearance.color, opacity: choice))
-                            }
-                        }
+                }
+            }
+            appearanceSection("Opacity") {
+                ForEach(SubtitleAppearance.OpacityChoice.allCases) { choice in
+                    appearanceChoice(
+                        title: choice.title,
+                        selected: subtitleAppearance.opacity == choice,
+                        identifier: "player.subtitle-opacity.\(choice.rawValue)"
+                    ) {
+                        updateSubtitleAppearance(SubtitleAppearance(font: subtitleAppearance.font, color: subtitleAppearance.color, opacity: choice))
                     }
                 }
             }
         }
-        .padding(36)
-        .frame(width: 880, height: 760, alignment: .topLeading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 32, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 32, style: .continuous).stroke(.white.opacity(0.16), lineWidth: 1))
+        .padding(48)
+        .frame(width: 1080, alignment: .topLeading)
+        .glassPanel(cornerRadius: 44)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("player.subtitle-appearance-panel")
     }
 
     private var subtitlePreview: some View {
         ZStack(alignment: .bottom) {
-            LinearGradient(colors: [.blue.opacity(0.68), .black.opacity(0.9)], startPoint: .top, endPoint: .bottom)
-            Text("A clear subtitle preview")
+            LinearGradient(
+                colors: [Color(red: 0.16, green: 0.24, blue: 0.40), Color(red: 0.36, green: 0.28, blue: 0.30), Color(red: 0.08, green: 0.08, blue: 0.10)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            Text("This is how subtitles will look.")
                 .font(subtitleAppearance.font.previewFont.weight(.semibold))
                 .foregroundStyle(subtitleAppearance.color.previewColor.opacity(subtitleAppearance.opacity.fraction))
                 .shadow(color: .black.opacity(0.9), radius: 3, y: 2)
-                .padding(.bottom, 24)
+                .padding(.bottom, 28)
         }
-        .frame(height: 130)
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .frame(height: 150)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 1))
         .accessibilityLabel("Subtitle preview")
+        .animation(.easeOut(duration: 0.2), value: subtitleAppearance)
+    }
+
+    private func panelHeader<Trailing: View>(_ title: String, @ViewBuilder trailing: () -> Trailing) -> some View {
+        HStack(alignment: .center) {
+            Text(title)
+                .font(.system(size: 44, weight: .bold))
+            Spacer(minLength: 24)
+            trailing()
+        }
+    }
+
+    private func sectionLabel(_ title: String) -> some View {
+        Text(title.uppercased())
+            .font(.system(size: 21, weight: .semibold))
+            .tracking(1.6)
+            .foregroundStyle(Theme.tertiaryText)
+            .padding(.horizontal, 24)
+            .padding(.top, 22)
+            .padding(.bottom, 6)
     }
 
     private func appearanceSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(title).font(.headline)
-            content()
+        VStack(alignment: .leading, spacing: 14) {
+            Text(title.uppercased())
+                .font(.system(size: 21, weight: .semibold))
+                .tracking(1.6)
+                .foregroundStyle(Theme.tertiaryText)
+            HStack(spacing: 16) { content() }
+                .focusSection()
         }
     }
 
-    private func appearanceChoice(title: String, selected: Bool, identifier: String, swatch: Color? = nil, action: @escaping () -> Void) -> some View {
+    private func appearanceChoice(title: String, selected: Bool, identifier: String, swatch: Color? = nil, focusTarget: FocusTarget? = nil, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 14) {
+            HStack(spacing: 12) {
                 if let swatch {
-                    Circle().fill(swatch).frame(width: 22, height: 22).overlay(Circle().stroke(.white.opacity(0.5), lineWidth: 1))
+                    Circle().fill(swatch).frame(width: 24, height: 24).overlay(Circle().strokeBorder(.black.opacity(0.25), lineWidth: 1))
                 }
                 Text(title)
-                Spacer()
-                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 13)
         }
-        .buttonStyle(.plain)
-        .focusEffectDisabled()
-        .background(selected ? Color.accentColor.opacity(0.16) : Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .buttonStyle(ChoiceChipButtonStyle(isSelected: selected))
+        .focused($focus, equals: focusTarget ?? .panelItem)
         .accessibilityIdentifier(identifier)
         .accessibilityValue(selected ? "selected" : "not selected")
     }
 
     private func trackRow(title: String, detail: String?, selected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 16) {
-                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text((selected ? "✓ " : "") + title).lineLimit(1)
-                    if let detail { Text(detail).font(.subheadline).foregroundStyle(.secondary) }
-                }
-                Spacer()
-            }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 14)
-            .contentShape(Rectangle())
+            PanelRowLabel(icon: selected ? "checkmark" : nil, title: title, detail: detail, trailingIcon: nil, reservesIconSpace: true)
         }
-        .buttonStyle(.plain)
-        .focusEffectDisabled()
-        .background(selected ? Color.accentColor.opacity(0.16) : Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .buttonStyle(RowButtonStyle())
+        // The selected row carries `.panel`, so opening a panel lands on it.
+        .focused($focus, equals: selected ? .panel : .panelItem)
+        .accessibilityLabel((selected ? "✓ " : "") + title)
+        .accessibilityValue(selected ? "selected" : "")
     }
 
     private func failureCard(message: String) -> some View {
-        VStack(spacing: 20) {
-            Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 42)).foregroundStyle(.yellow)
-            Text("Playback unavailable").font(.title2.weight(.bold))
-            Text(message).foregroundStyle(.secondary).multilineTextAlignment(.center).lineLimit(3)
-            HStack(spacing: 18) {
+        VStack(spacing: 22) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 56))
+                .foregroundStyle(Color(red: 1, green: 0.78, blue: 0.35))
+            Text("Playback unavailable")
+                .font(.system(size: 44, weight: .bold))
+            Text(message)
+                .font(.system(size: 28))
+                .foregroundStyle(.white.opacity(0.65))
+                .multilineTextAlignment(.center)
+                .lineLimit(3)
+            HStack(spacing: 22) {
                 Button("Try Again") { coordinator.retryPlayback() }
+                    .buttonStyle(PillButtonStyle(prominence: .primary))
                     .accessibilityIdentifier("player.retry")
                 Button("Done") { close() }
+                    .buttonStyle(PillButtonStyle())
                     .accessibilityIdentifier("player.failure-done")
             }
-            .buttonStyle(.borderedProminent)
+            .padding(.top, 14)
         }
-        .padding(38)
-        .frame(width: 620)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .padding(56)
+        .frame(width: 820)
+        .glassPanel(cornerRadius: 44)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("player.failure")
     }
 
     private var displayTime: TimeInterval { scrubTarget ?? currentTime }
-    private var nowPlayingDetail: String { coordinator.nowPlayingPath ?? "Video" }
+    private var nowPlayingDetail: String? {
+        guard let path = coordinator.nowPlayingPath else { return nil }
+        let parent = AListPath.parent(of: path)
+        return parent == "/" ? "Home" : parent.split(separator: "/").joined(separator: "  ›  ")
+    }
     private var selectedAudioTitle: String { audioTracks.first(where: \.isSelected)?.title ?? "Audio" }
     private var autoPlayAccessibilityValue: String {
         let state = coordinator.isAutoPlayEnabled ? "On" : "Off"
@@ -753,7 +818,7 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
     private func openPanel(_ panel: PresentedPanel) { presentedPanel = panel; hideChromeTask?.cancel(); chromeVisible = true; focus = .panel }
     private func dismissAppearance() {
         presentedPanel = .subtitles
-        focus = .panel
+        focus = .appearance
     }
 
     private func dismissPanel() {
@@ -780,8 +845,8 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
         hideChromeTask?.cancel()
         presentedPanel = nil
         if diagnostics != nil { setDiagnosticsEnabled(false) }
-        focus = .surface
         chromeVisible = false
+        focus = .surface
     }
 
     private func handleMove(_ direction: MoveCommandDirection) {
@@ -820,8 +885,8 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
         hideChromeTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(3))
             guard !Task.isCancelled, isPlaying, !isBuffering, presentedPanel == nil, diagnostics == nil, !coordinator.isTerminalFailure else { return }
-            focus = .surface
             chromeVisible = false
+            focus = .surface
         }
     }
 }
@@ -832,16 +897,91 @@ private struct AutoplayFeedbackView: View {
     var body: some View {
         Group {
             if let feedback = coordinator.autoPlayFeedback {
-                Text(feedback)
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(.tint)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(.white.opacity(0.14), in: Capsule())
+                Text("Autoplay \(feedback)")
+                    .font(.system(size: 20, weight: .bold))
+                    .tracking(0.8)
+                    .fixedSize()
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(feedback)
                     .accessibilityIdentifier("player.autoplay-feedback")
             }
+        }
+        .animation(.easeOut(duration: 0.2), value: coordinator.autoPlayFeedback)
+        .allowsHitTesting(false)
+    }
+}
+
+private struct PanelRowLabel: View {
+    let icon: String?
+    let title: String
+    let detail: String?
+    let trailingIcon: String?
+    var reservesIconSpace = false
+    @Environment(\.rowIsFocused) private var isFocused
+
+    var body: some View {
+        HStack(spacing: 20) {
+            if icon != nil || reservesIconSpace {
+                Image(systemName: icon ?? "checkmark")
+                    .font(.system(size: 24, weight: .bold))
+                    .foregroundStyle(isFocused ? Color.black : Theme.accent)
+                    .opacity(icon == nil ? 0 : 1)
+                    .frame(width: 32)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 29, weight: .semibold))
+                    .lineLimit(1)
+                if let detail {
+                    Text(detail)
+                        .font(.system(size: 22, weight: .medium))
+                        .foregroundStyle(isFocused ? Color.black.opacity(0.5) : Color.white.opacity(0.5))
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 12)
+            if let trailingIcon {
+                Image(systemName: trailingIcon)
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(isFocused ? Color.black.opacity(0.5) : Color.white.opacity(0.4))
+            }
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 18)
+        .contentShape(Rectangle())
+    }
+}
+
+private struct ChoiceChipButtonStyle: ButtonStyle {
+    let isSelected: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        ChipBody(configuration: configuration, isSelected: isSelected)
+    }
+
+    private struct ChipBody: View {
+        let configuration: Configuration
+        let isSelected: Bool
+        @Environment(\.isFocused) private var isFocused
+
+        var body: some View {
+            configuration.label
+                .font(.system(size: 26, weight: .semibold))
+                .lineLimit(1)
+                .foregroundStyle(isFocused ? Color.black : .white)
+                .padding(.horizontal, 28)
+                .frame(height: 64)
+                .background(Capsule().fill(isFocused ? Color.white : (isSelected ? Theme.accent.opacity(0.45) : Theme.surfaceRaised)))
+                .overlay(Capsule().strokeBorder(isSelected && !isFocused ? Theme.accent : .clear, lineWidth: 2))
+                .scaleEffect(configuration.isPressed ? 0.95 : (isFocused ? 1.08 : 1))
+                .shadow(color: .black.opacity(isFocused ? 0.35 : 0), radius: 14, y: 8)
+                .animation(Theme.focusSpring, value: isFocused)
+                .animation(.easeOut(duration: 0.15), value: isSelected)
         }
     }
 }
@@ -877,20 +1017,49 @@ private struct PlaybackTimeline: View {
     let duration: TimeInterval
     let isBuffering: Bool
     let isScrubbing: Bool
+    let isFocused: Bool
+    let scrubLabel: String?
 
     private var playedFraction: Double { PlaybackPresentation.clampedProgressFraction(currentTime, duration: duration) }
     private var bufferedFraction: Double { max(playedFraction, PlaybackPresentation.clampedProgressFraction(bufferedTime, duration: duration)) }
+    private var trackHeight: CGFloat { isFocused ? 14 : 8 }
+    private var knobSize: CGFloat { isScrubbing ? 30 : (isFocused ? 24 : 0) }
 
     var body: some View {
         GeometryReader { geometry in
             let width = geometry.size.width
+            let playhead = width * playedFraction
             ZStack(alignment: .leading) {
-                Capsule().fill(.white.opacity(0.22))
-                Capsule().fill(.white.opacity(0.45)).frame(width: width * bufferedFraction)
-                Capsule().fill(.tint).frame(width: width * playedFraction)
-                Circle().fill(.white).frame(width: isScrubbing ? 18 : 12, height: isScrubbing ? 18 : 12).offset(x: max(0, min(width - (isScrubbing ? 18 : 12), width * playedFraction - (isScrubbing ? 9 : 6))))
+                Capsule().fill(.white.opacity(0.18))
+                Capsule().fill(.white.opacity(0.32)).frame(width: width * bufferedFraction)
+                Capsule().fill(.white).frame(width: max(trackHeight, playhead))
             }
+            .frame(height: trackHeight)
+            .overlay(alignment: .leading) {
+                Circle()
+                    .fill(.white)
+                    .frame(width: knobSize, height: knobSize)
+                    .shadow(color: .black.opacity(0.4), radius: 8, y: 3)
+                    .offset(x: min(max(0, playhead - knobSize / 2), width - knobSize))
+            }
+            .overlay(alignment: .topLeading) {
+                if let scrubLabel {
+                    Text(scrubLabel)
+                        .font(.system(size: 26, weight: .bold).monospacedDigit())
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 8)
+                        .background(.white, in: Capsule())
+                        .fixedSize()
+                        .alignmentGuide(.leading) { $0.width / 2 }
+                        .offset(x: min(max(70, playhead), width - 70), y: -64)
+                        .transition(.opacity)
+                }
+            }
+            .frame(maxHeight: .infinity)
         }
+        .animation(Theme.focusSpring, value: isFocused)
+        .animation(.easeOut(duration: 0.15), value: isScrubbing)
         .accessibilityValue(isBuffering ? "Buffering" : "\(Int((playedFraction * 100).rounded())) percent played")
     }
 }
@@ -900,27 +1069,50 @@ private struct PlaybackDiagnosticsPanel: View {
     let close: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack { Text("Stats for Nerds").font(.title3.weight(.semibold)); Spacer(); Button("Close", action: close) }
-            group("Playback", ["Time": time(snapshot.currentTime) + " / " + time(snapshot.duration), "Playing": snapshot.isPlaying ? "Yes" : "No", "Seekable": snapshot.isSeekable ? "Yes" : "No"])
-            group("Network/Demux", ["Input": bytes(snapshot.inputBytesRead) + " · " + bitrate(snapshot.inputBitrate), "Demux": bytes(snapshot.demuxBytesRead) + " · " + bitrate(snapshot.demuxBitrate), "Errors": "\(snapshot.demuxCorrupted) corrupt · \(snapshot.demuxDiscontinuity) discontinuities"])
-            group("Video", ["Track": "\(snapshot.videoResolution ?? "—") · \(frameRate(snapshot.videoFrameRate)) · \(snapshot.videoCodec ?? "—")", "Frames": "\(snapshot.decodedVideo) decoded · \(snapshot.displayedPictures) displayed · \(snapshot.latePictures) late"])
-            group("Audio/Subtitles", ["Audio": metadata(snapshot.audioTitle, snapshot.audioLanguageCode, snapshot.audioCodec), "Subtitle": metadata(snapshot.subtitleTitle, snapshot.subtitleLanguageCode, snapshot.subtitleCodec)])
+        VStack(alignment: .leading, spacing: 22) {
+            HStack {
+                Text("Stats for Nerds").font(.system(size: 32, weight: .bold))
+                Spacer()
+                Button("Close", action: close).buttonStyle(PillButtonStyle())
+            }
+            group("Playback", [
+                ("Time", time(snapshot.currentTime) + " / " + time(snapshot.duration)),
+                ("Playing", snapshot.isPlaying ? "Yes" : "No"),
+                ("Seekable", snapshot.isSeekable ? "Yes" : "No")
+            ])
+            group("Network", [
+                ("Input", bytes(snapshot.inputBytesRead) + " · " + bitrate(snapshot.inputBitrate)),
+                ("Demux", bytes(snapshot.demuxBytesRead) + " · " + bitrate(snapshot.demuxBitrate)),
+                ("Errors", "\(snapshot.demuxCorrupted) corrupt · \(snapshot.demuxDiscontinuity) discontinuities")
+            ])
+            group("Video", [
+                ("Track", "\(snapshot.videoResolution ?? "—") · \(frameRate(snapshot.videoFrameRate)) · \(snapshot.videoCodec ?? "—")"),
+                ("Frames", "\(snapshot.decodedVideo) decoded · \(snapshot.displayedPictures) shown · \(snapshot.latePictures) late")
+            ])
+            group("Audio & Subtitles", [
+                ("Audio", metadata(snapshot.audioTitle, snapshot.audioLanguageCode, snapshot.audioCodec)),
+                ("Subtitle", metadata(snapshot.subtitleTitle, snapshot.subtitleLanguageCode, snapshot.subtitleCodec))
+            ])
         }
-        .font(.subheadline)
-        .frame(width: 760, alignment: .leading)
-        .padding(22)
-        .background(.black.opacity(0.88), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .font(.system(size: 22, weight: .medium).monospacedDigit())
+        .frame(width: 720, alignment: .leading)
+        .padding(36)
+        .glassPanel(cornerRadius: 32)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("player.diagnostics")
     }
 
-    private func group(_ title: String, _ rows: [String: String]) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.headline)
-            ForEach(rows.keys.sorted(), id: \.self) { key in
-                HStack(alignment: .firstTextBaseline, spacing: 14) {
-                    Text(key).foregroundStyle(.secondary).frame(width: 100, alignment: .leading)
-                    Text(rows[key] ?? "—").lineLimit(1)
+    private func group(_ title: String, _ rows: [(String, String)]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title.uppercased())
+                .font(.system(size: 18, weight: .bold))
+                .tracking(1.4)
+                .foregroundStyle(Theme.accent)
+                .padding(.bottom, 2)
+            ForEach(rows, id: \.0) { key, value in
+                HStack(alignment: .firstTextBaseline, spacing: 18) {
+                    Text(key).foregroundStyle(.white.opacity(0.5)).frame(width: 130, alignment: .leading)
+                    Text(value).foregroundStyle(.white.opacity(0.92)).lineLimit(1).minimumScaleFactor(0.8)
                 }
             }
         }
@@ -1082,3 +1274,4 @@ private final class MenuKeyCommandController: UIViewController {
         }
     }
 }
+

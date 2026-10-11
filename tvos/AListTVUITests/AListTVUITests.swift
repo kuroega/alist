@@ -276,16 +276,20 @@ final class AListTVUITests: XCTestCase {
         let panel = app.descendants(matching: .any)["player.subtitle-appearance-panel"]
         XCTAssertTrue(panel.waitForExistence(timeout: 3))
 
+        // Choices are laid out as horizontal rows of chips.
         let serif = app.buttons["player.subtitle-font.serif"]
-        focusAndSelect(serif, direction: .down)
+        focusSpatially(serif)
+        remote.press(.select)
         XCTAssertEqual(serif.value as? String, "selected")
 
         let yellow = app.buttons["player.subtitle-color.yellow"]
-        focusAndSelect(yellow, direction: .down)
+        focusSpatially(yellow)
+        remote.press(.select)
         XCTAssertEqual(yellow.value as? String, "selected")
 
         let medium = app.buttons["player.subtitle-opacity.50"]
-        focusAndSelect(medium, direction: .down)
+        focusSpatially(medium)
+        remote.press(.select)
         XCTAssertEqual(medium.value as? String, "selected")
     }
 
@@ -416,6 +420,25 @@ final class AListTVUITests: XCTestCase {
                 remote.press(candidate)
                 Thread.sleep(forTimeInterval: 0.15)
             }
+        }
+        XCTAssertTrue(element.hasFocus, "Could not focus \(element)")
+    }
+
+    /// Moves focus toward `element` by comparing on-screen positions, for
+    /// layouts where options sit side by side rather than in one column.
+    private func focusSpatially(_ element: XCUIElement) {
+        XCTAssertTrue(element.waitForExistence(timeout: 3))
+        for _ in 0..<16 where !element.hasFocus {
+            let focused = app.descendants(matching: .any).matching(NSPredicate(format: "hasFocus == true")).firstMatch
+            guard focused.exists else { remote.press(.down); continue }
+            let dy = element.frame.midY - focused.frame.midY
+            let dx = element.frame.midX - focused.frame.midX
+            if abs(dy) > element.frame.height / 2 {
+                remote.press(dy > 0 ? .down : .up)
+            } else {
+                remote.press(dx > 0 ? .right : .left)
+            }
+            Thread.sleep(forTimeInterval: 0.2)
         }
         XCTAssertTrue(element.hasFocus, "Could not focus \(element)")
     }
