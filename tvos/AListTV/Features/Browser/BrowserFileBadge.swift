@@ -128,6 +128,7 @@ struct BrowserFileBadgeView: View {
     let badge: BrowserFileBadge
     let size: Size
     var isFocused = false
+    var extensionAlignment: Alignment = .bottomTrailing
 
     var body: some View {
         ZStack {
@@ -155,7 +156,7 @@ struct BrowserFileBadgeView: View {
                     .tracking(1.2)
                     .lineLimit(1)
                     .foregroundStyle(.white.opacity(0.55))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: extensionAlignment)
                     .padding(.horizontal, 18)
                     .padding(.vertical, 14)
             }

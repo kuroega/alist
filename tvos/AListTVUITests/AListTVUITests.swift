@@ -54,6 +54,67 @@ final class AListTVUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Ascending"].exists || app.buttons["Descending"].exists)
     }
 
+    func testRecentsStartsEmptyAndLeadsToBrowse() {
+        login(username: "alice", openBrowse: false)
+
+        XCTAssertTrue(app.buttons["recents.browse"].waitForExistence(timeout: 3))
+        attachScreenshot(named: "recents-empty")
+        focusAndSelect(app.buttons["recents.browse"], direction: .down)
+
+        XCTAssertTrue(app.buttons["browser.item./Shows"].waitForExistence(timeout: 3))
+    }
+
+    func testOpenedFilesAppearInRecentsNewestFirstAndReplay() {
+        login(username: "alice")
+        openAndDismissPlayer(app.buttons["browser.item./Sample.mp4"], direction: .right)
+        openAndDismissPlayer(app.buttons["browser.item./Next.mp3"], direction: .left)
+
+        focusAndSelect(app.buttons["home.mode.recents"], direction: .up)
+        let newest = app.buttons["recents.item./Next.mp3"]
+        let older = app.buttons["recents.item./Sample.mp4"]
+        XCTAssertTrue(newest.waitForExistence(timeout: 3))
+        XCTAssertTrue(older.exists)
+        XCTAssertTrue(
+            newest.frame.minY < older.frame.minY
+                || (newest.frame.minY == older.frame.minY && newest.frame.minX < older.frame.minX),
+            "Most recently opened file should come first"
+        )
+        XCTAssertFalse(app.buttons["recents.item./Shows"].exists)
+        focusSpatially(newest)
+        attachScreenshot(named: "recents-grid")
+
+        let viewMode = app.buttons["recents.view-mode"]
+        let initialLabel = viewMode.label
+        focusAndSelect(viewMode, direction: .up)
+        XCTAssertNotEqual(app.buttons["recents.view-mode"].label, initialLabel)
+        XCTAssertTrue(newest.waitForExistence(timeout: 3))
+        attachScreenshot(named: "recents-list")
+
+        focusAndSelect(older, direction: .down)
+        XCTAssertTrue(app.buttons["player.done"].waitForExistence(timeout: 3))
+    }
+
+    func testModeSwitchKeepsBrowseFolder() {
+        login(username: "alice")
+        focusAndSelect(app.buttons["browser.item./Shows"], direction: .right)
+        XCTAssertTrue(app.buttons["browser.item./Shows/Episode.mp4"].waitForExistence(timeout: 3))
+
+        focusAndSelect(app.buttons["home.mode.recents"], direction: .up)
+        XCTAssertTrue(app.buttons["recents.browse"].waitForExistence(timeout: 3))
+        focusAndSelect(app.buttons["home.mode.browse"], direction: .right)
+
+        XCTAssertTrue(app.buttons["browser.item./Shows/Episode.mp4"].waitForExistence(timeout: 3))
+        attachScreenshot(named: "browse-nested")
+
+        // Menu climbs out of the folder first, then hands focus to the top bar.
+        remote.press(.menu)
+        let shows = app.buttons["browser.item./Shows"]
+        XCTAssertTrue(shows.waitForExistence(timeout: 3))
+        focus(shows, direction: .down)
+        remote.press(.menu)
+        waitForFocus(app.buttons["home.mode.browse"])
+    }
+
     func testOTPChallengeThenLogin() {
         loginForm(username: "otp")
         focusAndSelect(app.buttons["connection.connect"], direction: .down)
@@ -65,7 +126,8 @@ final class AListTVUITests: XCTestCase {
         if !verify.hasFocus { remote.press(.right) }
         XCTAssertTrue(verify.hasFocus)
         remote.press(.select)
-        XCTAssertTrue(app.buttons["browser.item./Shows"].waitForExistence(timeout: 3))
+        assertLandsOnRecents()
+        XCTAssertTrue(app.buttons["recents.browse"].waitForExistence(timeout: 3))
     }
 
     func testLogoutReturnsToConnection() {
@@ -380,9 +442,41 @@ final class AListTVUITests: XCTestCase {
         remote.press(.down)
     }
 
-    private func login(username: String) {
+    /// Signs in, checks the app lands on Recents, then opens Browse unless
+    /// the test wants to stay on the landing screen.
+    private func login(username: String, openBrowse: Bool = true) {
         loginForm(username: username)
         focusAndSelect(app.buttons["connection.connect"], direction: .down)
+        assertLandsOnRecents()
+        if openBrowse { showBrowse() }
+    }
+
+    private func assertLandsOnRecents() {
+        let recentsTab = app.buttons["home.mode.recents"]
+        XCTAssertTrue(recentsTab.waitForExistence(timeout: 3))
+        XCTAssertTrue(recentsTab.isSelected, "Recents should be the default view")
+        XCTAssertFalse(app.buttons["home.mode.browse"].isSelected)
+    }
+
+    private func showBrowse() {
+        let browseTab = app.buttons["home.mode.browse"]
+        focusSpatially(browseTab)
+        remote.press(.select)
+        XCTAssertTrue(app.buttons["browser.item./Shows"].waitForExistence(timeout: 3))
+        // Selecting a tab leaves focus on it; step down into the folder grid.
+        let focusedItem = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'browser.item.' AND hasFocus == true")).firstMatch
+        for _ in 0..<4 where !focusedItem.exists {
+            remote.press(.down)
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        XCTAssertTrue(focusedItem.exists, "Focus should reach the folder grid")
+        // Start from the first card, where focus used to land at launch.
+        let first = app.buttons["browser.item./Shows"]
+        for _ in 0..<6 where !first.hasFocus {
+            remote.press(.left)
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        XCTAssertTrue(first.hasFocus)
     }
 
     private func loginForm(username: String) {
@@ -397,6 +491,27 @@ final class AListTVUITests: XCTestCase {
     }
 
 
+
+    private func openAndDismissPlayer(_ item: XCUIElement, direction: XCUIRemote.Button) {
+        XCTAssertTrue(item.waitForExistence(timeout: 3))
+        focusAndSelect(item, direction: direction)
+        let done = app.buttons["player.done"]
+        XCTAssertTrue(done.waitForExistence(timeout: 3))
+        remote.press(.menu)
+        XCTAssertFalse(done.waitForExistence(timeout: 1))
+        remote.press(.menu)
+        XCTAssertTrue(item.waitForExistence(timeout: 3))
+        expectation(for: NSPredicate(format: "value == 'focused'"), evaluatedWith: item)
+        waitForExpectations(timeout: 3)
+    }
+
+    private func attachScreenshot(named name: String) {
+        Thread.sleep(forTimeInterval: 0.6)
+        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
 
     private func focusAndSelect(
         _ element: XCUIElement,

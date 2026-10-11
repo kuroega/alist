@@ -17,6 +17,25 @@ final class PlayerCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.state, .playing)
     }
 
+    func testReportsStartedPlaybackOnlyAfterURLResolves() async {
+        let api = PlayerFakeAPI(details: [
+            detail(url: "http://media.example/video.mp4", path: "/insecure.mp4"),
+            detail(url: "https://media.example/video.mp4", path: "/ok.mp4")
+        ])
+        var started: [String?] = []
+        let coordinator = makeCoordinator(
+            api: api,
+            player: PlayerFakeController(),
+            onPlaybackStarted: { started.append($0.virtualPath) }
+        )
+
+        await coordinator.play(object: object("/insecure.mp4"))
+        XCTAssertEqual(started, [])
+        coordinator.playerDidDisappear()
+        await coordinator.play(object: object("/ok.mp4"))
+        XCTAssertEqual(started, ["/ok.mp4"])
+    }
+
     func testRejectsInsecureAndEmptyRawURL() async {
         let api = PlayerFakeAPI(details: [
             detail(url: "http://media.example/video.mp4", path: "/one.mp4"),
@@ -582,6 +601,7 @@ final class PlayerCoordinatorTests: XCTestCase {
         api: PlayerFakeAPI,
         player: PlayerFakeController,
         store: PlaybackProgressStore? = nil,
+        onPlaybackStarted: @escaping @MainActor (AListObject) -> Void = { _ in },
         subtitleDataLoader: @escaping @Sendable (URL) async throws -> Data = { url in try nativeSubtitleData(for: url) },
         resumeCountdownInterval: Duration = .seconds(1)
     ) -> PlayerCoordinator {
@@ -605,6 +625,7 @@ final class PlayerCoordinatorTests: XCTestCase {
             playbackSettingsStore: PlaybackSettingsStore(defaults: settingsDefaults),
             baseURL: URL(string: "https://alist.example")!,
             username: "alice",
+            onPlaybackStarted: onPlaybackStarted,
             subtitleDataLoader: subtitleDataLoader,
             resumeCountdownInterval: resumeCountdownInterval
         )

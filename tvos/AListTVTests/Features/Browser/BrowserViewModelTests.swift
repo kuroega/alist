@@ -132,6 +132,22 @@ final class BrowserViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.items.map(\.name), ["Folder", "fresh"])
     }
 
+    func testRevealOpensContainingFolderAndFocusesFile() async throws {
+        let api = BrowserFakeAPI(responses: [
+            .success(path: "/Shows/Season 1", page: 1, value: DirectoryPage(content: [
+                AListObject(virtualPath: "/Shows/Season 1/E01.mkv", name: "E01.mkv", isDirectory: false),
+                AListObject(virtualPath: "/Shows/Season 1/E02.mkv", name: "E02.mkv", isDirectory: false)
+            ], hasMore: false, page: 1, perPage: 200))
+        ])
+        let viewModel = BrowserViewModel(api: api)
+
+        viewModel.reveal(AListObject(virtualPath: "//Shows/Season 1/E02.mkv", name: "E02.mkv", isDirectory: false))
+        try await waitUntil { viewModel.state == .loaded }
+
+        XCTAssertEqual(viewModel.path, "/Shows/Season 1")
+        XCTAssertEqual(viewModel.focusedVirtualPath, "/Shows/Season 1/E02.mkv")
+    }
+
     func testReturnRestoresFocus() async throws {
         let folder = object("Folder", directory: true)
         let api = BrowserFakeAPI(responses: [

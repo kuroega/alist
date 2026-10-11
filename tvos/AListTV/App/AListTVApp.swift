@@ -28,6 +28,7 @@ private struct AppRootView: View {
         .animation(.easeInOut(duration: 0.35), value: container.route)
         .tint(Theme.accent)
         .preferredColorScheme(.dark)
+        .defaultAppStorage(container.appStorage)
         .task { await container.restoreSession() }
     }
 
@@ -45,10 +46,13 @@ private struct AppRootView: View {
             )
         case .browser:
             if let browser = container.browserViewModel,
+               let recents = container.recentsViewModel,
                let player = container.playerCoordinator {
-                BrowserHost(
+                HomeView(
                     browser: browser,
+                    recents: recents,
                     player: player,
+                    connection: container.connectionViewModel.activeConnection,
                     onLogout: container.logout,
                     logoutError: container.logoutError,
                     dismissLogoutError: container.dismissLogoutError
@@ -68,26 +72,5 @@ private struct LaunchView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AmbientBackground())
-    }
-}
-
-private struct BrowserHost: View {
-    @ObservedObject var browser: BrowserViewModel
-    @ObservedObject var player: PlayerCoordinator
-    let onLogout: () -> Void
-    let logoutError: String?
-    let dismissLogoutError: () -> Void
-
-    var body: some View {
-        BrowserView(
-            viewModel: browser,
-            onLogout: onLogout,
-            logoutError: logoutError,
-            dismissLogoutError: dismissLogoutError,
-            isCovered: player.isPresented
-        )
-            .fullScreenCover(isPresented: $player.isPresented) {
-                PlayerView(coordinator: player)
-            }
     }
 }

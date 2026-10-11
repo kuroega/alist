@@ -110,6 +110,15 @@ final class BrowserViewModel: ObservableObject {
         }
     }
 
+    /// Opens the folder containing `object` and focuses it there.
+    func reveal(_ object: AListObject) {
+        guard let rawPath = object.virtualPath, !rawPath.isEmpty else { return }
+        let filePath = AListPath.normalize(rawPath)
+        let parent = AListPath.parent(of: filePath)
+        path = parent
+        beginLoading(path: parent, restoredFocus: filePath)
+    }
+
     func moveToParent() {
         guard path != "/" else { return }
         let parent = AListPath.parent(of: path)

@@ -53,6 +53,7 @@ final class PlayerCoordinator: ObservableObject {
     private let baseURL: URL
     private let username: String
     private let onUnauthorized: @MainActor () async -> Void
+    private let onPlaybackStarted: @MainActor (AListObject) -> Void
     private let subtitleDataLoader: @Sendable (URL) async throws -> Data
     private let resumeCountdownInterval: Duration
     private var currentObject: AListObject?
@@ -77,6 +78,7 @@ final class PlayerCoordinator: ObservableObject {
         baseURL: URL,
         username: String,
         onUnauthorized: @escaping @MainActor () async -> Void = {},
+        onPlaybackStarted: @escaping @MainActor (AListObject) -> Void = { _ in },
         subtitleDataLoader: @escaping @Sendable (URL) async throws -> Data = PlayerCoordinator.loadSubtitleData,
         resumeCountdownInterval: Duration = .seconds(1)
     ) {
@@ -90,6 +92,7 @@ final class PlayerCoordinator: ObservableObject {
         self.baseURL = baseURL
         self.username = username
         self.onUnauthorized = onUnauthorized
+        self.onPlaybackStarted = onPlaybackStarted
         self.subtitleDataLoader = subtitleDataLoader
         self.resumeCountdownInterval = resumeCountdownInterval
         controller.setSubtitleAppearance(subtitleAppearance)
@@ -148,6 +151,7 @@ final class PlayerCoordinator: ObservableObject {
             guard sessionID == activeSession else { return }
             isPresented = true
             state = .playing
+            onPlaybackStarted(object)
             startMonitoring(session: activeSession)
             if let record = resumableProgress {
                 beginResumePrompt(position: record.position, duration: record.duration, session: activeSession)

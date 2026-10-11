@@ -2,12 +2,6 @@ import SwiftUI
 
 struct BrowserView: View {
     @ObservedObject var viewModel: BrowserViewModel
-    let onLogout: () -> Void
-    let logoutError: String?
-    let dismissLogoutError: () -> Void
-    /// While the player covers this screen, Menu must never fall through to
-    /// the system, or it would dismiss the player instead of its controls.
-    var isCovered = false
 
     @FocusState private var focusedPath: String?
     @AppStorage("com.alist.tv.browser-list-view") private var isListView = false
@@ -21,7 +15,7 @@ struct BrowserView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
                 .padding(.horizontal, Theme.screenPadding)
-                .padding(.top, 56)
+                .padding(.top, 20)
                 .padding(.bottom, 28)
                 .focusSection()
 
@@ -29,21 +23,12 @@ struct BrowserView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .focusSection()
         }
-        .background(AmbientBackground())
-        .alert(
-            "Unable to sign out",
-            isPresented: Binding(
-                get: { logoutError != nil },
-                set: { if !$0 { dismissLogoutError() } }
-            )
-        ) {
-            Button("OK", role: .cancel, action: dismissLogoutError)
-        } message: {
-            Text(logoutError ?? "")
-        }
         .onAppear {
             applySort()
             if viewModel.state == .idle { viewModel.loadInitial() }
+            // A file revealed from Recents may finish loading before this
+            // view mounts, so pick up the pending focus here too.
+            if let target = viewModel.focusedVirtualPath { focusedPath = target }
         }
         .onChange(of: sortCriterionRaw) { _, _ in applySort() }
         .onChange(of: isSortAscending) { _, _ in applySort() }
@@ -56,8 +41,6 @@ struct BrowserView: View {
         .onChange(of: viewModel.focusedVirtualPath) { _, value in
             if value != nil { focusedPath = value }
         }
-        // At the root, let Menu fall through so the system can leave the app.
-        .onExitCommand(perform: viewModel.path == "/" && !isCovered ? nil : { viewModel.moveToParent() })
     }
 
     // MARK: Header
@@ -96,12 +79,6 @@ struct BrowserView: View {
                 .accessibilityIdentifier("browser.view-mode")
 
                 sortButton
-
-                Button(action: onLogout) {
-                    Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
-                }
-                .accessibilityLabel("Sign Out")
-                .accessibilityIdentifier("browser.logout")
             }
             .buttonStyle(GlassIconButtonStyle(diameter: 72))
             .padding(.bottom, 8)
@@ -320,7 +297,7 @@ struct BrowserView: View {
 
 /// Removes the system focus treatment so tiles can lift only their artwork,
 /// keeping titles steady and legible beneath.
-private struct TileButtonStyle: ButtonStyle {
+struct TileButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
@@ -422,14 +399,15 @@ private struct BrowserListRow: View {
 }
 
 /// Server thumbnail when AList provides one, falling back to the file badge.
-private struct BrowserArtwork: View {
+struct BrowserArtwork: View {
     let item: AListObject
     let badge: BrowserFileBadge
     let isFocused: Bool
     var size: BrowserFileBadgeView.Size = .card
+    var extensionAlignment: Alignment = .bottomTrailing
 
     var body: some View {
-        let fallback = BrowserFileBadgeView(badge: badge, size: size, isFocused: isFocused)
+        let fallback = BrowserFileBadgeView(badge: badge, size: size, isFocused: isFocused, extensionAlignment: extensionAlignment)
         if let thumbnail = item.thumbnail, let url = URL(string: thumbnail), !thumbnail.isEmpty {
             AsyncImage(url: url, transaction: Transaction(animation: .easeOut(duration: 0.25))) { phase in
                 switch phase {

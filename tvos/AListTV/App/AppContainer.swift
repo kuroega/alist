@@ -11,17 +11,21 @@ final class AppContainer: ObservableObject {
     @Published private(set) var route: Route = .connection
     @Published private(set) var browserViewModel: BrowserViewModel?
     @Published private(set) var playerCoordinator: PlayerCoordinator?
+    @Published private(set) var recentsViewModel: RecentsViewModel?
     @Published private(set) var logoutError: String?
     @Published private(set) var isRestoringSession = true
 
 
     let connectionViewModel: ConnectionViewModel
+    /// Backing store for view preferences such as the home mode and layout.
+    let appStorage: UserDefaults
 
     private let controllerFactory: @MainActor () -> any PlayerControlling
     private let subtitleDataLoader: @Sendable (URL) async throws -> Data
     private let subtitleAppearanceStore: SubtitleAppearanceStore
     private let playbackProgressStore: PlaybackProgressStore
     private let playbackSettingsStore: PlaybackSettingsStore
+    private let recentItemsStore: RecentItemsStore
     private var didAttemptRestore = false
 
     init(arguments: [String] = ProcessInfo.processInfo.arguments) {
@@ -33,6 +37,8 @@ final class AppContainer: ObservableObject {
         let subtitleDataLoader: @Sendable (URL) async throws -> Data
         let playbackProgressStore: PlaybackProgressStore
         let playbackSettingsStore: PlaybackSettingsStore
+        let recentItemsStore: RecentItemsStore
+        let appStorage: UserDefaults
 
 #if DEBUG
         if arguments.contains("ui-testing") {
@@ -45,6 +51,8 @@ final class AppContainer: ObservableObject {
             subtitleAppearanceStore = SubtitleAppearanceStore(defaults: defaults)
             playbackProgressStore = PlaybackProgressStore(defaults: defaults)
             playbackSettingsStore = PlaybackSettingsStore(defaults: defaults)
+            recentItemsStore = RecentItemsStore(defaults: defaults)
+            appStorage = defaults
             clientFactory = { _, _ in fixtureAPI }
             controllerFactory = { FixturePlayerController(autoCompletesPlayback: arguments.contains("ui-testing-autoplay")) }
             subtitleDataLoader = FixtureSubtitleDataLoader.load
@@ -55,6 +63,8 @@ final class AppContainer: ObservableObject {
             subtitleAppearanceStore = SubtitleAppearanceStore()
             playbackProgressStore = PlaybackProgressStore()
             playbackSettingsStore = PlaybackSettingsStore()
+        recentItemsStore = RecentItemsStore()
+        appStorage = .standard
             clientFactory = { baseURL, clientID in
                 AListClient(
                     baseURL: baseURL,
@@ -72,6 +82,8 @@ final class AppContainer: ObservableObject {
         subtitleAppearanceStore = SubtitleAppearanceStore()
         playbackProgressStore = PlaybackProgressStore()
         playbackSettingsStore = PlaybackSettingsStore()
+        recentItemsStore = RecentItemsStore()
+        appStorage = .standard
         clientFactory = { baseURL, clientID in
             AListClient(
                 baseURL: baseURL,
@@ -88,6 +100,8 @@ final class AppContainer: ObservableObject {
         self.subtitleAppearanceStore = subtitleAppearanceStore
         self.playbackProgressStore = playbackProgressStore
         self.playbackSettingsStore = playbackSettingsStore
+        self.recentItemsStore = recentItemsStore
+        self.appStorage = appStorage
         connectionViewModel = ConnectionViewModel(
             preferences: preferences,
             credentialStore: credentialStore,
@@ -147,9 +161,17 @@ final class AppContainer: ObservableObject {
             baseURL: connection.baseURL,
             username: connection.username,
             onUnauthorized: { [weak self] in self?.handleUnauthorized() },
+            onPlaybackStarted: { [weak self] object in self?.recentsViewModel?.recordOpen(object) },
             subtitleDataLoader: subtitleDataLoader
         )
         playerCoordinator = player
+        recentsViewModel = RecentsViewModel(
+            store: recentItemsStore,
+            progressStore: playbackProgressStore,
+            baseURL: connection.baseURL,
+            username: connection.username,
+            onOpen: { [weak player] object in await player?.play(object: object) }
+        )
         browserViewModel = BrowserViewModel(
             api: api,
             onPlay: { [weak player] object in await player?.play(object: object) },
@@ -167,6 +189,7 @@ final class AppContainer: ObservableObject {
         playerCoordinator?.playerDidDisappear()
         playerCoordinator = nil
         browserViewModel = nil
+        recentsViewModel = nil
         route = .connection
     }
 }
