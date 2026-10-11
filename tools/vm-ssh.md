@@ -96,6 +96,38 @@ Use the normal home Wi-Fi, with guest/client isolation disabled for these device
    Loading the key into the agent allows noninteractive commands with a
    passphrase-protected key. Reload it when necessary after logout/restart.
 
+## Current working setup (verified 2026-10-11)
+
+The Mac (`10.127.1.139` on `en0`) connects directly to the VM with key-only login:
+
+- Key: `~/.ssh/alist_vm_ed25519` (comment `alist-macbook`, fingerprint
+  `SHA256:r4u5M7L39pf/uMVLkI7Uw6WEYFRfSorXG6D/rXdZ/t0`), created without a
+  passphrase so noninteractive commands work. To add one later:
+  `ssh-keygen -p -f ~/.ssh/alist_vm_ed25519`, then
+  `ssh-add --apple-use-keychain ~/.ssh/alist_vm_ed25519`.
+- The public key was appended to the VM's `~/.ssh/authorized_keys` (the existing
+  Windows key was kept) over a one-time password login; the password file was
+  then deleted.
+- `~/.ssh/config` contains exactly the `alist-vm` block from step 5.
+- Host key in `~/.ssh/known_hosts` matches the ED25519 fingerprint above.
+
+Verified with:
+
+```sh
+ssh -o BatchMode=yes -o PasswordAuthentication=no alist-vm 'hostname; go version'
+ALIST_VM_HOST=alist-vm sh tools/macos/alist-vm.sh doctor
+ssh alist-vm 'wget -qO- -T 5 http://127.0.0.1:5244/ping'   # prints: pong
+```
+
+Notes:
+
+- Claude Code's Bash sandbox blocks LAN traffic and reports
+  `No route to host` (even though ARP resolves the VM). Run SSH/`nc` commands to
+  the VM with the sandbox disabled; a normal macOS Terminal is unaffected.
+- From the Mac, ARP shows `10.127.1.109` at `3c:e9:f7:e7:a5:e0`, not the VM's
+  `00:0c:29:b4:5a:a4`; VMware bridging over Wi-Fi likely presents the Windows
+  Wi-Fi MAC. Check which MAC the router sees before creating the DHCP reservation.
+
 ## Repository helper
 
 After pushing these files and pulling them on the Mac, run from the repository:
@@ -119,65 +151,6 @@ remote shell program and preserves its exit status. `doctor` and `exec` use
 are listed by `sh tools/macos/alist-vm.sh help`. The wrapper defaults to user
 `kuroega` and port 22 even with an alias; set its environment variables if needed.
 
-## Build and debug without touching production
-
-Use a separate checkout owned by `kuroega`, for example `~/src/alist-dev`. Clone
-your actual repository URL there and check out the development branch you pushed.
-For a private remote, configure the VM's own repository access separately; Mac SSH
-login does not grant Git access. Do not copy a personal private key to the VM.
-Edit that checkout over SSH or push from your Mac and pull on the VM. These are
-separate working copies: pulling on the Mac does not update the VM automatically.
-
-In the VM checkout:
-
-```sh
-cd ~/src/alist-dev
-git status --short
-git pull --ff-only
-mkdir -p bin
-go build -tags=jsoniter -gcflags='all=-N -l' -o bin/alist-debug .
-ALIST_ADDR=127.0.0.1 ALIST_HTTP_PORT=5245 \
-  ./bin/alist-debug --data "$HOME/.local/share/alist-dev" --log-std server
-```
-
-Use a fresh development data directory, never `/var/lib/alist`; do not copy the
-production config with its absolute database paths. This starts an independent
-instance with its own users and storage settings. Install missing build packages
-on Alpine with `sudo apk add git build-base` if a build reports missing tools.
-The frontend is not supplied by this helper: `public/dist` in a fresh clone only
-contains a README. Put a compatible built frontend there before compiling if you
-need the web UI; backend compilation alone does not provide it.
-
-Do not use the repository's release `build.sh` for this workflow: some branches
-download toolchains or remove `.git`. The direct `go build` above keeps debug
-symbols and does not replace the production executable.
-
-For breakpoint debugging, stop your development process with Ctrl-C and install
-Delve in the VM (`go install github.com/go-delve/delve/cmd/dlv@latest`). Then run:
-
-```sh
-cd ~/src/alist-dev
-ALIST_ADDR=127.0.0.1 ALIST_HTTP_PORT=5245 \
-  "$(go env GOPATH)/bin/dlv" exec ./bin/alist-debug \
-  --headless --listen=127.0.0.1:2345 --api-version=2 --accept-multiclient \
-  -- --data "$HOME/.local/share/alist-dev" --log-std server
-```
-
-On the Mac, in another terminal:
-
-```sh
-export ALIST_VM_HOST=alist-vm
-sh tools/macos/alist-vm.sh debug-tunnel
-```
-
-Use a Delve client on the Mac with `dlv connect 127.0.0.1:12345`, then set
-breakpoints and `continue`. The server waits for the debugger to continue before
-serving HTTP. The development web URL is `http://127.0.0.1:15244`. The CLI uses
-Delve's JSON-RPC API; current headless Delve also accepts DAP clients. For an IDE,
-configure remote attachment to this existing process and map Mac source paths
-to the absolute VM checkout path if required. Keep both checkouts on the same
-commit. Delve listens only on VM loopback and is reached through SSH.
-
 ## Troubleshooting and alternatives
 
 - Timeout: confirm the VM is running, its current IP, the Mac's Wi-Fi/subnet,
@@ -197,5 +170,4 @@ commit. Delve listens only on VM loopback and is reached through SSH.
   make its bridged VM accessible through Tailscale.
 
 References: [VMware networking modes](https://knowledge.broadcom.com/external/article/309842/understanding-networking-types-in-hosted.html),
-[OpenSSH commands and forwarding](https://man.openbsd.org/ssh),
-[Delve documentation](https://github.com/go-delve/delve/tree/master/Documentation).
+[OpenSSH commands and forwarding](https://man.openbsd.org/ssh).
