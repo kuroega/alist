@@ -99,6 +99,9 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
         }
         media.addOption(":network-caching=3000")
         media.addOption(":http-reconnect")
+        if let demux = PlaybackPresentation.vlcDemuxOption(for: url) {
+            media.addOption(demux)
+        }
         subtitleAppearance.vlcMediaOptions.forEach(media.addOption)
         mediaPlayer.media = media
     }

@@ -10,6 +10,14 @@ final class PlayerControllerModelTests: XCTestCase {
         XCTAssertEqual(PlaybackPresentation.clampedSeekTarget(-10, duration: 0), 0)
     }
 
+    func testMatroskaSourcesUseTrustedCueDemuxer() {
+        let mkv = URL(string: "http://10.0.0.2:5244/p/Shows/Episode%201.MKV?sign=abc")!
+        XCTAssertEqual(PlaybackPresentation.vlcDemuxOption(for: mkv), ":demux=mkv_trusted,any")
+        XCTAssertEqual(PlaybackPresentation.vlcDemuxOption(for: URL(string: "http://h/p/a.webm")!), ":demux=mkv_trusted,any")
+        XCTAssertNil(PlaybackPresentation.vlcDemuxOption(for: URL(string: "http://h/p/a.mp4?sign=x.mkv")!))
+        XCTAssertNil(PlaybackPresentation.vlcDemuxOption(for: URL(string: "http://h/api/playback/id/index.m3u8")!))
+    }
+
     func testProgressFractionClampsToTimelineBounds() {
         XCTAssertEqual(PlaybackPresentation.clampedProgressFraction(-10, duration: 120), 0)
         XCTAssertEqual(PlaybackPresentation.clampedProgressFraction(60, duration: 120), 0.5)
