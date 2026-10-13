@@ -12,6 +12,7 @@ final class AppContainer: ObservableObject {
     @Published private(set) var browserViewModel: BrowserViewModel?
     @Published private(set) var playerCoordinator: PlayerCoordinator?
     @Published private(set) var recentsViewModel: RecentsViewModel?
+    @Published private(set) var galleryViewModel: GalleryViewModel?
     @Published private(set) var logoutError: String?
     @Published private(set) var isRestoringSession = true
 
@@ -26,6 +27,8 @@ final class AppContainer: ObservableObject {
     private let playbackProgressStore: PlaybackProgressStore
     private let playbackSettingsStore: PlaybackSettingsStore
     private let recentItemsStore: RecentItemsStore
+    private let tmdbAPIKey: String?
+    private let galleryCacheDirectory: URL?
     private var didAttemptRestore = false
 
     init(arguments: [String] = ProcessInfo.processInfo.arguments) {
@@ -39,6 +42,8 @@ final class AppContainer: ObservableObject {
         let playbackSettingsStore: PlaybackSettingsStore
         let recentItemsStore: RecentItemsStore
         let appStorage: UserDefaults
+        var tmdbAPIKey = TMDBConfiguration.apiKey()
+        var galleryCacheDirectory: URL?
 
 #if DEBUG
         if arguments.contains("ui-testing") {
@@ -56,6 +61,9 @@ final class AppContainer: ObservableObject {
             clientFactory = { _, _ in fixtureAPI }
             controllerFactory = { FixturePlayerController(autoCompletesPlayback: arguments.contains("ui-testing-autoplay")) }
             subtitleDataLoader = FixtureSubtitleDataLoader.load
+            // UI tests stay offline and never reuse a real library index.
+            tmdbAPIKey = nil
+            galleryCacheDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("gallery-ui-testing-\(UUID().uuidString)")
         } else {
             let sessionStore = SessionCredentialStore(backing: KeychainCredentialStore())
             credentialStore = sessionStore
@@ -102,6 +110,8 @@ final class AppContainer: ObservableObject {
         self.playbackSettingsStore = playbackSettingsStore
         self.recentItemsStore = recentItemsStore
         self.appStorage = appStorage
+        self.tmdbAPIKey = tmdbAPIKey
+        self.galleryCacheDirectory = galleryCacheDirectory
         connectionViewModel = ConnectionViewModel(
             preferences: preferences,
             credentialStore: credentialStore,
@@ -177,6 +187,17 @@ final class AppContainer: ObservableObject {
             onPlay: { [weak player] object in await player?.play(object: object) },
             onUnauthorized: { [weak self] in self?.handleUnauthorized() }
         )
+        galleryViewModel = GalleryViewModel(
+            api: api,
+            store: GalleryLibraryStore(baseURL: connection.baseURL, username: connection.username, defaults: appStorage, directory: galleryCacheDirectory),
+            progressStore: playbackProgressStore,
+            recentItemsStore: recentItemsStore,
+            baseURL: connection.baseURL,
+            username: connection.username,
+            tmdbAPIKey: tmdbAPIKey,
+            onPlay: { [weak player] object in await player?.play(object: object) },
+            onUnauthorized: { [weak self] in self?.handleUnauthorized() }
+        )
         route = .browser
     }
 
@@ -190,6 +211,7 @@ final class AppContainer: ObservableObject {
         playerCoordinator = nil
         browserViewModel = nil
         recentsViewModel = nil
+        galleryViewModel = nil
         route = .connection
     }
 }

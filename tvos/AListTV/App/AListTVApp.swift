@@ -47,11 +47,14 @@ private struct AppRootView: View {
         case .browser:
             if let browser = container.browserViewModel,
                let recents = container.recentsViewModel,
+               let gallery = container.galleryViewModel,
                let player = container.playerCoordinator {
                 HomeView(
                     browser: browser,
                     recents: recents,
                     player: player,
+                    gallery: gallery,
+                    galleryNavigator: gallery.navigator,
                     connection: container.connectionViewModel.activeConnection,
                     onLogout: container.logout,
                     logoutError: container.logoutError,

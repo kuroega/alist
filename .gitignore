@@ -46,3 +46,6 @@ tvos-backend.md
 .env
 # Local device install script
 /tvos/scripts/install-keting.fish
+
+# Local TMDB credential bundled into the tvOS app (see tvos/Config/TMDB.local.plist.example)
+/tvos/AListTV/Resources/TMDB.local.plist

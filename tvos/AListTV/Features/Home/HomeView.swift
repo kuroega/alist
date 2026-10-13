@@ -3,6 +3,7 @@ import SwiftUI
 enum HomeMode: String, CaseIterable, Identifiable {
     case recents
     case browse
+    case gallery
 
     var id: String { rawValue }
 
@@ -10,6 +11,7 @@ enum HomeMode: String, CaseIterable, Identifiable {
         switch self {
         case .recents: "Recents"
         case .browse: "Browse"
+        case .gallery: "Gallery"
         }
     }
 
@@ -17,16 +19,22 @@ enum HomeMode: String, CaseIterable, Identifiable {
         switch self {
         case .recents: "clock.arrow.circlepath"
         case .browse: "folder"
+        case .gallery: "film.stack"
         }
     }
+
+    /// Position in the switcher, so content slides in from the side it sits on.
+    var order: Int { Self.allCases.firstIndex(of: self) ?? 0 }
 }
 
-/// Signed-in shell: a top bar that switches between recently opened files
-/// and the folder browser, with the player presented over both.
+/// Signed-in shell: a top bar that switches between recently opened files,
+/// the folder browser and the media Gallery, with the player presented over all.
 struct HomeView: View {
     @ObservedObject var browser: BrowserViewModel
     @ObservedObject var recents: RecentsViewModel
     @ObservedObject var player: PlayerCoordinator
+    let gallery: GalleryViewModel
+    @ObservedObject var galleryNavigator: GalleryNavigator
     let connection: StoredConnection?
     let onLogout: () -> Void
     let logoutError: String?
@@ -35,8 +43,27 @@ struct HomeView: View {
     @AppStorage("com.alist.tv.home-mode") private var modeRaw = HomeMode.recents.rawValue
     @FocusState private var focusedMode: HomeMode?
     @FocusState private var isSignOutFocused: Bool
+    @State private var previousModeOrder = 0
 
     var body: some View {
+        NavigationStack(path: $galleryNavigator.path) {
+            home
+                .toolbar(.hidden, for: .navigationBar)
+                .navigationDestination(for: GalleryRoute.self, destination: galleryDestination)
+        }
+        .onChange(of: player.isPresented) { _, isPresented in
+            // The player saves its resume point on dismissal; refresh the bars.
+            if !isPresented {
+                recents.reload()
+                gallery.reloadWatchState()
+            }
+        }
+        .fullScreenCover(isPresented: $player.isPresented) {
+            PlayerView(coordinator: player)
+        }
+    }
+
+    private var home: some View {
         VStack(spacing: 0) {
             topBar
                 .padding(.horizontal, Theme.screenPadding)
@@ -50,15 +77,27 @@ struct HomeView: View {
                         onBrowse: { select(.browse) },
                         onReveal: reveal
                     )
-                    .transition(.opacity.combined(with: .offset(x: -40)))
+                    .transition(modeTransition)
                 case .browse:
-                    BrowserView(viewModel: browser)
-                        .transition(.opacity.combined(with: .offset(x: 40)))
+                    BrowserView(viewModel: browser, gallery: gallery)
+                        .transition(modeTransition)
+                case .gallery:
+                    GalleryView(viewModel: gallery, onReveal: reveal)
+                        .transition(modeTransition)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(AmbientBackground())
+        .background {
+            ZStack {
+                AmbientBackground()
+                if mode == .gallery {
+                    GalleryBackdrop(spotlight: gallery.spotlight)
+                        .transition(.opacity)
+                }
+            }
+            .animation(.easeInOut(duration: 0.4), value: mode)
+        }
         .alert(
             "Unable to sign out",
             isPresented: Binding(
@@ -71,13 +110,25 @@ struct HomeView: View {
             Text(logoutError ?? "")
         }
         .onExitCommand(perform: exitAction)
-        .onChange(of: player.isPresented) { _, isPresented in
-            // The player saves its resume point on dismissal; refresh the bars.
-            if !isPresented { recents.reload() }
+    }
+
+    @ViewBuilder
+    private func galleryDestination(_ route: GalleryRoute) -> some View {
+        switch route {
+        case let .title(title, focusPath):
+            GalleryDetailView(viewModel: gallery, title: title, focusPath: focusPath, onReveal: reveal)
+        case let .collection(collection):
+            GalleryCollectionView(viewModel: gallery, collection: collection)
         }
-        .fullScreenCover(isPresented: $player.isPresented) {
-            PlayerView(coordinator: player)
-        }
+    }
+
+    /// Content slides in from the side its tab sits on.
+    private var modeTransition: AnyTransition {
+        let forward = mode.order >= previousModeOrder
+        return .asymmetric(
+            insertion: .opacity.combined(with: .offset(x: forward ? 40 : -40)),
+            removal: .opacity.combined(with: .offset(x: forward ? -40 : 40))
+        )
     }
 
     // MARK: Top bar
@@ -112,6 +163,7 @@ struct HomeView: View {
 
     private func select(_ newMode: HomeMode) {
         guard newMode != mode else { return }
+        previousModeOrder = mode.order
         withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
             modeRaw = newMode.rawValue
         }
@@ -119,6 +171,7 @@ struct HomeView: View {
 
     private func reveal(_ object: AListObject) {
         browser.reveal(object)
+        galleryNavigator.path.removeAll()
         select(.browse)
     }
 

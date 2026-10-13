@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Copy to tvos/AListTV/Resources/TMDB.local.plist (git-ignored) and paste a
+     TMDB v3 API key or v4 read access token. The Gallery uses it for posters
+     and metadata. -->
+<plist version="1.0">
+<dict>
+	<key>APIKey</key>
+	<string>your_tmdb_api_key_here</string>
+</dict>
+</plist>

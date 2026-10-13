@@ -2,6 +2,8 @@ import SwiftUI
 
 struct BrowserView: View {
     @ObservedObject var viewModel: BrowserViewModel
+    /// When present, folders offer "Add to Gallery" on long press.
+    var gallery: GalleryViewModel?
 
     @FocusState private var focusedPath: String?
     @AppStorage("com.alist.tv.browser-list-view") private var isListView = false
@@ -154,6 +156,7 @@ struct BrowserView: View {
                         BrowserCard(item: item)
                     }
                     .buttonStyle(TileButtonStyle())
+                    .galleryFolderMenu(item, gallery: gallery)
                     .focused($focusedPath, equals: item.virtualPath)
                     .accessibilityIdentifier("browser.item.\(item.virtualPath ?? item.name)")
                     .accessibilityValue(focusedPath == item.virtualPath ? "focused" : "")
@@ -178,6 +181,7 @@ struct BrowserView: View {
                         BrowserListRow(item: item)
                     }
                     .buttonStyle(RowButtonStyle(cornerRadius: 22))
+                    .galleryFolderMenu(item, gallery: gallery)
                     .focused($focusedPath, equals: item.virtualPath)
                     .accessibilityIdentifier("browser.item.\(item.virtualPath ?? item.name)")
                     .accessibilityValue(focusedPath == item.virtualPath ? "focused" : "")
@@ -292,6 +296,35 @@ struct BrowserView: View {
 
     private func applySort() {
         viewModel.setSort(criterion: currentSortCriterion, ascending: isSortAscending)
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func galleryFolderMenu(_ item: AListObject, gallery: GalleryViewModel?) -> some View {
+        if let gallery, item.isDirectory, let path = item.virtualPath {
+            contextMenu { GalleryFolderMenuItem(gallery: gallery, path: path) }
+        } else {
+            self
+        }
+    }
+}
+
+/// Observes the Gallery so the menu always reflects the current folder list.
+private struct GalleryFolderMenuItem: View {
+    @ObservedObject var gallery: GalleryViewModel
+    let path: String
+
+    var body: some View {
+        if gallery.isRoot(path) {
+            Button { gallery.toggleRoot(path) } label: {
+                Label("Remove from Gallery", systemImage: "minus.circle")
+            }
+        } else {
+            Button { gallery.toggleRoot(path) } label: {
+                Label("Add to Gallery", systemImage: "film.stack")
+            }
+        }
     }
 }
 

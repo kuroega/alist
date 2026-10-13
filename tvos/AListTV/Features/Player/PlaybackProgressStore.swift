@@ -13,8 +13,16 @@ struct PlaybackProgressRecord: Codable, Equatable, Sendable {
     var updatedAt: Date
 }
 
+/// A file played to the end (or marked as watched by hand).
+struct WatchedRecord: Codable, Equatable, Sendable {
+    let identity: PlaybackProgressIdentity
+    var watchedAt: Date
+}
+
 struct PlaybackProgressStore {
     static let defaultsKey = "com.alist.tv.playback-progress-v1"
+    static let watchedDefaultsKey = "com.alist.tv.watched-v1"
+    static let watchedLimit = 5_000
     private let defaults: UserDefaults
     private let now: () -> Date
     private let encoder = PropertyListEncoder()
@@ -36,6 +44,7 @@ struct PlaybackProgressStore {
         if ratio >= 0.9 {
             all.removeAll { $0.identity == identity }
             save(all)
+            setWatched(true, identity: identity)
             return
         }
         guard position >= 30 else { return }
@@ -66,6 +75,28 @@ struct PlaybackProgressStore {
 
     func allRecords() -> [PlaybackProgressRecord] {
         records()
+    }
+
+    func watchedRecords() -> [WatchedRecord] {
+        guard let data = defaults.data(forKey: Self.watchedDefaultsKey),
+              let decoded = try? decoder.decode([WatchedRecord].self, from: data) else {
+            return []
+        }
+        return decoded
+    }
+
+    /// Marking a file watched also drops its resume point, matching what
+    /// finishing playback does; unmarking leaves any resume point alone.
+    func setWatched(_ watched: Bool, identity: PlaybackProgressIdentity) {
+        var all = watchedRecords()
+        all.removeAll { $0.identity == identity }
+        if watched {
+            all.insert(WatchedRecord(identity: identity, watchedAt: now()), at: 0)
+            if all.count > Self.watchedLimit { all.removeSubrange(Self.watchedLimit...) }
+            remove(identity: identity)
+        }
+        guard let data = try? encoder.encode(all) else { return }
+        defaults.set(data, forKey: Self.watchedDefaultsKey)
     }
 
     private func records() -> [PlaybackProgressRecord] {
