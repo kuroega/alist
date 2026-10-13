@@ -76,6 +76,19 @@ final class AListClientContractTests: XCTestCase {
         XCTAssertEqual(page.content[0].modified, "2026-08-19T10:11:12.123456789Z")
     }
 
+    func testListSendsRefreshFlag() async throws {
+        ContractURLProtocol.handler = { request in
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.url?.path, "/api/fs/list")
+            let body = try Self.bodyData(for: request)
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            XCTAssertEqual(json["refresh"] as? Bool, true)
+            XCTAssertEqual(json["path"] as? String, "/Movies")
+            return Self.response(for: request, status: 200, body: Fixtures.directoryWithOptionalFieldsMissing)
+        }
+        _ = try await makeClient().list(path: "/Movies", page: 1, perPage: 200, refresh: true)
+    }
+
     func testAuthenticatedHeaders() async throws {
         ContractURLProtocol.handler = { request in
             XCTAssertEqual(request.httpMethod, "GET")

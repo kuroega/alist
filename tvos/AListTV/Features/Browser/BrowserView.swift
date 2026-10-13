@@ -81,6 +81,7 @@ struct BrowserView: View {
                 .accessibilityIdentifier("browser.view-mode")
 
                 sortButton
+                refreshButton
             }
             .buttonStyle(GlassIconButtonStyle(diameter: 72))
             .padding(.bottom, 8)
@@ -103,6 +104,36 @@ struct BrowserView: View {
             Button("Descending") { isSortAscending = false }
         } message: {
             Text("Currently sorted by \(currentSortCriterion.title.lowercased()), \(isSortAscending ? "ascending" : "descending").")
+        }
+    }
+
+    private var refreshButton: some View {
+        Button {
+            viewModel.refresh()
+        } label: {
+            Label {
+                Text("Refresh")
+            } icon: {
+                TimelineView(.animation(paused: !viewModel.isRefreshing)) { context in
+                    Image(systemName: "arrow.clockwise")
+                        .rotationEffect(.degrees(viewModel.isRefreshing
+                            ? context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1) * 360
+                            : 0))
+                }
+            }
+        }
+        .accessibilityLabel(viewModel.isRefreshing ? "Refreshing" : "Refresh")
+        .accessibilityIdentifier("browser.refresh")
+        .alert(
+            "Unable to refresh",
+            isPresented: Binding(
+                get: { viewModel.refreshError != nil },
+                set: { if !$0 { viewModel.refreshError = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { viewModel.refreshError = nil }
+        } message: {
+            Text(viewModel.refreshError ?? "")
         }
     }
 

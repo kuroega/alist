@@ -179,6 +179,69 @@ final class BrowserViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.state, .loaded)
     }
 
+    func testRefreshReplacesListingAndKeepsFocus() async throws {
+        let api = BrowserFakeAPI(responses: [
+            .success(path: "/", page: 1, value: DirectoryPage(content: [object("a"), object("b")], hasMore: false, page: 1, perPage: 200)),
+            .success(path: "/", page: 1, value: DirectoryPage(content: [object("b"), object("new")], hasMore: false, page: 1, perPage: 200), delay: 100_000_000)
+        ])
+        let viewModel = BrowserViewModel(api: api)
+        viewModel.loadInitial()
+        try await waitUntil { viewModel.state == .loaded }
+        viewModel.focusedVirtualPath = "/b"
+
+        viewModel.refresh()
+        XCTAssertTrue(viewModel.isRefreshing)
+        XCTAssertEqual(viewModel.items.map(\.name), ["a", "b"], "Old listing stays visible while refreshing")
+        viewModel.refresh()
+        try await waitUntil { !viewModel.isRefreshing }
+
+        XCTAssertEqual(viewModel.items.map(\.name), ["b", "new"])
+        XCTAssertEqual(viewModel.state, .loaded)
+        XCTAssertEqual(viewModel.focusedVirtualPath, "/b")
+        let calls = await api.calls
+        XCTAssertEqual(calls, [
+            ListCall(path: "/", page: 1, perPage: 200),
+            ListCall(path: "/", page: 1, perPage: 200, refresh: true)
+        ])
+    }
+
+    func testRefreshWithoutPermissionKeepsListing() async throws {
+        let api = BrowserFakeAPI(responses: [
+            .success(path: "/", page: 1, value: DirectoryPage(content: [object("a")], hasMore: false, page: 1, perPage: 200)),
+            .failure(path: "/", page: 1, error: .server(code: 403, message: "Refresh without permission"))
+        ])
+        let viewModel = BrowserViewModel(api: api)
+        viewModel.loadInitial()
+        try await waitUntil { viewModel.state == .loaded }
+
+        viewModel.refresh()
+        try await waitUntil { !viewModel.isRefreshing }
+
+        XCTAssertEqual(viewModel.state, .loaded)
+        XCTAssertEqual(viewModel.items.map(\.name), ["a"])
+        XCTAssertNotNil(viewModel.refreshError)
+    }
+
+    func testNavigationDuringRefreshIgnoresStaleRefresh() async throws {
+        let folder = object("Folder", directory: true)
+        let api = BrowserFakeAPI(responses: [
+            .success(path: "/", page: 1, value: DirectoryPage(content: [folder], hasMore: false, page: 1, perPage: 200)),
+            .success(path: "/", page: 1, value: DirectoryPage(content: [folder, object("stale")], hasMore: false, page: 1, perPage: 200), delay: 200_000_000),
+            .success(path: "/Folder", page: 1, value: DirectoryPage(content: [object("inside")], hasMore: false, page: 1, perPage: 200))
+        ])
+        let viewModel = BrowserViewModel(api: api)
+        viewModel.loadInitial()
+        try await waitUntil { viewModel.state == .loaded }
+
+        viewModel.refresh()
+        viewModel.open(folder)
+        try await waitUntil { viewModel.state == .loaded && viewModel.path == "/Folder" }
+        try await Task.sleep(for: .milliseconds(300))
+
+        XCTAssertFalse(viewModel.isRefreshing)
+        XCTAssertEqual(viewModel.items.map(\.name), ["inside"])
+    }
+
     private func object(
         _ name: String,
         directory: Bool = false,
@@ -212,6 +275,7 @@ private struct ListCall: Equatable, Sendable {
     let path: String
     let page: Int
     let perPage: Int
+    var refresh = false
 }
 
 private struct BrowserResponse: Sendable {
@@ -241,8 +305,8 @@ private actor BrowserFakeAPI: AListAPI {
 
     func currentUser() async throws -> CurrentUser { throw AListAPIError.invalidResponse }
 
-    func list(path: String, page: Int, perPage: Int) async throws -> DirectoryPage {
-        calls.append(ListCall(path: path, page: page, perPage: perPage))
+    func list(path: String, page: Int, perPage: Int, refresh: Bool) async throws -> DirectoryPage {
+        calls.append(ListCall(path: path, page: page, perPage: perPage, refresh: refresh))
         guard let index = responses.firstIndex(where: { $0.path == path && $0.page == page }) else {
             throw AListAPIError.invalidResponse
         }

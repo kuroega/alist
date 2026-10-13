@@ -712,7 +712,7 @@ private actor PlayerFakeAPI: AListAPI {
 
     func login(username: String, password: String, otpCode: String?) async throws -> LoginData { throw AListAPIError.invalidResponse }
     func currentUser() async throws -> CurrentUser { throw AListAPIError.invalidResponse }
-    func list(path: String, page: Int, perPage: Int) async throws -> DirectoryPage {
+    func list(path: String, page: Int, perPage: Int, refresh: Bool) async throws -> DirectoryPage {
         if listFailures > 0 {
             listFailures -= 1
             throw AListAPIError.transport(message: "List unavailable")

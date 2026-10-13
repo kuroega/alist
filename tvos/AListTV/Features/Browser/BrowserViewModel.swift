@@ -37,6 +37,9 @@ final class BrowserViewModel: ObservableObject {
     @Published private(set) var sortCriterion: BrowserSortCriterion = .name
     @Published private(set) var isSortAscending = true
     @Published private(set) var hasMore = false
+    @Published private(set) var isRefreshing = false
+    /// Set when a refresh fails while the previous listing stays on screen.
+    @Published var refreshError: String?
 
 
     private struct PageKey: Hashable {
@@ -82,7 +85,7 @@ final class BrowserViewModel: ObservableObject {
     }
 
     func loadNextPageIfNeeded(currentItem: AListObject) {
-        guard hasMore, !items.isEmpty,
+        guard hasMore, !isRefreshing, !items.isEmpty,
               let currentPath = currentItem.virtualPath,
               let index = items.firstIndex(where: { $0.virtualPath == currentPath }) else {
             return
@@ -128,10 +131,30 @@ final class BrowserViewModel: ObservableObject {
         beginLoading(path: parent, restoredFocus: restored)
     }
     func retry() {
+        guard !isRefreshing else { return }
         if let page = failedNextPage, !items.isEmpty {
             requestPage(page, initial: false, generation: generation, requestedPath: path)
         } else {
             beginLoading(path: path, restoredFocus: pendingRestoredFocus)
+        }
+    }
+
+    /// Re-reads the current folder with `refresh: true`, keeping the current
+    /// listing visible until the fresh first page arrives.
+    func refresh() {
+        guard !isRefreshing, state != .loading else { return }
+        loadTask?.cancel()
+        generation = UUID()
+        let currentGeneration = generation
+        let requestedPath = path
+        let restoredFocus = focusedVirtualPath
+        inFlight.removeAll()
+        isRefreshing = true
+        refreshError = nil
+        // Any in-flight or failed "load more" belongs to the stale listing.
+        if state == .loadingMore || isLoadMoreFailure { state = .loaded }
+        loadTask = Task { [weak self] in
+            await self?.performRefresh(generation: currentGeneration, requestedPath: requestedPath, restoredFocus: restoredFocus)
         }
     }
 
@@ -142,11 +165,28 @@ final class BrowserViewModel: ObservableObject {
         updateItems()
     }
 
+    private var isLoadMoreFailure: Bool {
+        if case .loadMoreFailed = state { return true }
+        return false
+    }
+
     private func beginLoading(path requestedPath: String, restoredFocus: String?) {
         loadTask?.cancel()
         generation = UUID()
         let currentGeneration = generation
         inFlight.removeAll()
+        resetListing()
+        pendingRestoredFocus = restoredFocus
+        focusedVirtualPath = nil
+        isRefreshing = false
+        refreshError = nil
+        state = .loading
+        loadTask = Task { [weak self] in
+            await self?.fetchPage(1, initial: true, generation: currentGeneration, requestedPath: requestedPath, restoredFocus: restoredFocus)
+        }
+    }
+
+    private func resetListing() {
         requestedPages.removeAll()
         directoryItems.removeAll(keepingCapacity: true)
         fileItems.removeAll(keepingCapacity: true)
@@ -154,12 +194,35 @@ final class BrowserViewModel: ObservableObject {
         items.removeAll(keepingCapacity: true)
         hasMore = false
         nextPage = 1
-        pendingRestoredFocus = restoredFocus
         failedNextPage = nil
-        focusedVirtualPath = nil
-        state = .loading
-        loadTask = Task { [weak self] in
-            await self?.fetchPage(1, initial: true, generation: currentGeneration, requestedPath: requestedPath, restoredFocus: restoredFocus)
+    }
+
+    private func performRefresh(generation requestGeneration: UUID, requestedPath: String, restoredFocus: String?) async {
+        do {
+            let page = try await api.list(path: requestedPath, page: 1, perPage: perPage, refresh: true)
+            guard !Task.isCancelled, generation == requestGeneration, path == requestedPath else { return }
+            isRefreshing = false
+            resetListing()
+            requestedPages.insert(PageKey(path: requestedPath, page: 1))
+            appendPage(page.content, parentPath: requestedPath)
+            hasMore = page.hasMore ?? (page.content.count == perPage)
+            nextPage = 2
+            state = items.isEmpty && !hasMore ? .empty : .loaded
+            if let restoredFocus, items.contains(where: { $0.virtualPath == restoredFocus }) {
+                focusedVirtualPath = restoredFocus
+            }
+        } catch AListAPIError.unauthorized {
+            guard generation == requestGeneration, path == requestedPath else { return }
+            isRefreshing = false
+            await onUnauthorized()
+        } catch {
+            guard !Task.isCancelled, generation == requestGeneration, path == requestedPath else { return }
+            isRefreshing = false
+            if case let AListAPIError.server(code, _) = error, code == 403 {
+                refreshError = "Refreshing requires write permission for this folder."
+            } else {
+                refreshError = Self.message(for: error)
+            }
         }
     }
 

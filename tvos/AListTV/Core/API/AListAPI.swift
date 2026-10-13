@@ -3,8 +3,16 @@ import Foundation
 protocol AListAPI: Sendable {
     func login(username: String, password: String, otpCode: String?) async throws -> LoginData
     func currentUser() async throws -> CurrentUser
-    func list(path: String, page: Int, perPage: Int) async throws -> DirectoryPage
+    /// `refresh` asks AList to bypass its directory cache and re-read the
+    /// storage; the server requires write permission for it.
+    func list(path: String, page: Int, perPage: Int, refresh: Bool) async throws -> DirectoryPage
     func get(path: String) async throws -> FileDetail
+}
+
+extension AListAPI {
+    func list(path: String, page: Int, perPage: Int) async throws -> DirectoryPage {
+        try await list(path: path, page: page, perPage: perPage, refresh: false)
+    }
 }
 
 enum AListAPIError: Error, Equatable, LocalizedError, Sendable {

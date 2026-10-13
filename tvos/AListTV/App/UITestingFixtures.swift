@@ -16,7 +16,7 @@ actor FixtureAListAPI: AListAPI {
         return LoginData(token: "fixture-token", deviceKey: "fixture-device")
     }
     func currentUser() async throws -> CurrentUser { CurrentUser(id: 1, username: "fixture") }
-    func list(path: String, page: Int, perPage: Int) async throws -> DirectoryPage {
+    func list(path: String, page: Int, perPage: Int, refresh: Bool) async throws -> DirectoryPage {
         let content: [AListObject]
         if path == "/" {
             content = [

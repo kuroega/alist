@@ -33,11 +33,11 @@ actor AListClient: AListAPI {
         try await send(path: "/api/me", method: "GET", bodyData: nil, authenticated: true)
     }
 
-    func list(path: String, page: Int, perPage: Int) async throws -> DirectoryPage {
+    func list(path: String, page: Int, perPage: Int, refresh: Bool) async throws -> DirectoryPage {
         try await send(
             path: "/api/fs/list",
             method: "POST",
-            body: ListRequest(path: path, page: page, perPage: perPage, refresh: false),
+            body: ListRequest(path: path, page: page, perPage: perPage, refresh: refresh),
             authenticated: true
         )
     }

@@ -19,7 +19,7 @@ actor FakeLibraryServer: AListAPI {
     func currentUser() async throws -> CurrentUser { throw AListAPIError.invalidResponse }
     func get(path: String) async throws -> FileDetail { throw AListAPIError.invalidResponse }
 
-    func list(path: String, page: Int, perPage: Int) async throws -> DirectoryPage {
+    func list(path: String, page: Int, perPage: Int, refresh: Bool) async throws -> DirectoryPage {
         listed.append(path)
         if unreadable.contains(path) { throw AListAPIError.transport(message: "Folder is offline") }
         guard let content = folders[path] else { throw AListAPIError.server(code: 500, message: "object not found") }

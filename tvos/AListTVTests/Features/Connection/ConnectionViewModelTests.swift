@@ -155,7 +155,7 @@ private actor ConnectionFakeAPI: AListAPI {
         return CurrentUser(id: 1, username: "alice")
     }
 
-    func list(path: String, page: Int, perPage: Int) async throws -> DirectoryPage {
+    func list(path: String, page: Int, perPage: Int, refresh: Bool) async throws -> DirectoryPage {
         throw AListAPIError.invalidResponse
     }
 
