@@ -113,6 +113,8 @@ final class GalleryViewModel: ObservableObject {
     /// Bumped per scan so a cancelled scan's late updates are ignored.
     private var scanGeneration = 0
     private var rebuildTask: Task<Void, Never>?
+    /// Bumped per catalog build so a slower, older build never lands last.
+    private var catalogVersion = 0
 
     /// Titles waiting for a TMDB lookup, by match key.
     private var matchQueue: [String: ParsedMedia] = [:]
@@ -169,7 +171,10 @@ final class GalleryViewModel: ObservableObject {
     func onAppear() {
         reloadWatchState()
         if didLoad {
-            if isLoaded, !isScanning, let mode = dueScanMode() { startScan(mode) }
+            guard isLoaded else { return }
+            // Retries titles a paused or failed run left without a match.
+            enqueueMatches(for: files.values)
+            if !isScanning, let mode = dueScanMode() { startScan(mode) }
             return
         }
         startLoading()
@@ -548,16 +553,31 @@ final class GalleryViewModel: ObservableObject {
         rebuildTask = Task { [weak self] in
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled, let self else { return }
+            // Cleared before building so changes arriving meanwhile schedule another.
             self.rebuildTask = nil
-            self.rebuildCatalog()
+            self.catalogVersion += 1
+            let version = self.catalogVersion
+            let files = self.files
+            let matches = self.matches
+            // Grouping a large library is too slow for the main thread.
+            let catalog = await Task.detached(priority: .userInitiated) {
+                GalleryCatalog.build(files: files.values.sorted { $0.path < $1.path }, matches: matches)
+            }.value
+            guard version == self.catalogVersion else { return }
+            self.apply(catalog)
         }
     }
 
     private func rebuildCatalog() {
         rebuildTask?.cancel()
         rebuildTask = nil
+        catalogVersion += 1
         // Path order keeps grouping stable between rebuilds.
-        catalog = GalleryCatalog.build(files: files.values.sorted { $0.path < $1.path }, matches: matches)
+        apply(GalleryCatalog.build(files: files.values.sorted { $0.path < $1.path }, matches: matches))
+    }
+
+    private func apply(_ catalog: GalleryCatalog) {
+        self.catalog = catalog
         rebuildShelves()
         refreshSpotlight()
     }
@@ -672,16 +692,25 @@ final class GalleryViewModel: ObservableObject {
         }
     }
 
-    /// Looks titles up a few at a time, saving each answer as it arrives and
+    /// Lookups wait on TMDB round trips, not the CPU, so many run at once;
+    /// the client's gate keeps the requests themselves within TMDB's limits.
+    static let concurrentMatches = 24
+    /// Lookups failing in a row on the network before matching pauses: past
+    /// this, TMDB is unreachable from here and every lookup would time out.
+    static let unreachableAfter = 20
+
+    /// Looks titles up many at a time, saving answers in small batches and
     /// refreshing the shelves as posters land. Titles queued meanwhile join in.
     private func runMatching(client: TMDBClient, language: String, generation: Int) async {
         var issue: String?
         var stopped = false
+        var unsaved: [String: GalleryMatch] = [:]
+        var lastSave = Date()
+        var networkFailures = 0
         await withTaskGroup(of: (String, Result<GalleryMatch, Error>).self) { group in
             var running = 0
-            var lastPublish = Date()
             while true {
-                while running < 6, !stopped, let next = matchQueue.popFirst() {
+                while running < Self.concurrentMatches, !stopped, let next = matchQueue.popFirst() {
                     matchingKeys.insert(next.key)
                     running += 1
                     group.addTask {
@@ -703,25 +732,38 @@ final class GalleryViewModel: ObservableObject {
                 matchesDone += 1
                 switch result {
                 case let .success(match):
+                    networkFailures = 0
                     matches[key] = match
-                    database.saveMatches([key: match], language: language)
+                    unsaved[key] = match
                 case .failure(TMDBError.unauthorized):
                     issue = "TMDB rejected the API key. Check TMDB.local.plist."
                     // Every other lookup would fail the same way.
                     stopped = true
                     matchQueue.removeAll()
+                case .failure(TMDBError.transport):
+                    networkFailures += 1
+                    issue = issue ?? "Some titles could not reach TMDB. They will retry on the next update."
+                    if networkFailures >= Self.unreachableAfter, !stopped {
+                        issue = "Can't reach TMDB from this network (requests time out). Matching is paused and resumes when you reopen the Gallery."
+                        stopped = true
+                        matchQueue.removeAll()
+                    }
                 case .failure:
                     issue = issue ?? "Some titles could not reach TMDB. They will retry on the next update."
                 }
                 updateMatchProgress()
-                // Fill posters in as they land without rebuilding on every reply.
-                if Date().timeIntervalSince(lastPublish) > 0.8 {
-                    lastPublish = Date()
-                    rebuildCatalog()
+                if unsaved.count >= 50 || Date().timeIntervalSince(lastSave) > 1 {
+                    database.saveMatches(unsaved, language: language)
+                    unsaved.removeAll()
+                    lastSave = Date()
                 }
+                // Fill posters in as they land without rebuilding on every reply.
+                scheduleRebuild()
             }
         }
+        // A restart (language switch, clean-up) drops what this run has not saved.
         guard generation == matchGeneration else { return }
+        database.saveMatches(unsaved, language: language)
         matchTask = nil
         rebuildCatalog()
         if let issue { metadataIssue = issue }

@@ -76,22 +76,48 @@ enum TMDBError: Error, Equatable {
 
 /// Thin TMDB v3 client. Every response is cached on disk, so the Gallery
 /// reopens without touching the network and stays within TMDB's rate limits.
-actor TMDBClient {
+///
+/// Requests run concurrently: lookups are bound by round-trip latency, not
+/// work, so throughput comes from keeping many in flight. A shared gate caps
+/// them below TMDB's per-IP limits and merges identical concurrent requests.
+final class TMDBClient: Sendable {
+    /// Requests in flight at once, across every caller of this client.
+    static let maxConcurrentRequests = 20
+
+    /// Our own session: enough connections per host for the gate's limit,
+    /// and no URL cache since every response is cached on disk already.
+    static let defaultSession: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        configuration.httpMaximumConnectionsPerHost = maxConcurrentRequests
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: configuration)
+    }()
+
     let language: String
     private let apiKey: String
     private let session: URLSession
     private let cache: TMDBResponseCache
-    private let decoder: JSONDecoder = {
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return decoder
-    }()
+    private let gate: TMDBRequestGate
 
-    init(apiKey: String, language: String = TMDBConfiguration.language(), session: URLSession = .shared, cache: TMDBResponseCache = TMDBResponseCache()) {
+    init(
+        apiKey: String,
+        language: String = TMDBConfiguration.language(),
+        session: URLSession = TMDBClient.defaultSession,
+        cache: TMDBResponseCache = TMDBResponseCache(),
+        maxConcurrentRequests: Int = TMDBClient.maxConcurrentRequests
+    ) {
         self.apiKey = apiKey
         self.language = language
         self.session = session
         self.cache = cache
+        self.gate = TMDBRequestGate(limit: maxConcurrentRequests)
+    }
+
+    private static func decode<Response: Decodable>(_ type: Response.Type, from data: Data) throws -> Response {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(type, from: data)
     }
 
     /// Searches in the client's language, or in `language` when given.
@@ -150,7 +176,7 @@ actor TMDBClient {
         let queryItems = (items + [URLQueryItem(name: "language", value: language ?? self.language)]).sorted { $0.name < $1.name }
         let cacheKey = path + "?" + queryItems.map { "\($0.name)=\($0.value ?? "")" }.joined(separator: "&")
 
-        if let data = await cache.data(for: cacheKey, maxAge: maxAge), let decoded = try? decoder.decode(Response.self, from: data) {
+        if let data = await cache.data(for: cacheKey, maxAge: maxAge), let decoded = try? Self.decode(Response.self, from: data) {
             return decoded
         }
 
@@ -158,34 +184,49 @@ actor TMDBClient {
         let usesBearer = apiKey.hasPrefix("eyJ")
         components.queryItems = usesBearer ? queryItems : queryItems + [URLQueryItem(name: "api_key", value: apiKey)]
         guard let url = components.url else { throw TMDBError.invalidResponse }
-        var request = URLRequest(url: url, timeoutInterval: 20)
+        // Even a slow proxied round trip answers well within this; longer only
+        // delays noticing that TMDB is unreachable.
+        var request = URLRequest(url: url, timeoutInterval: 10)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if usesBearer { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
 
+        let data: Data
+        do {
+            let session = session
+            data = try await gate.run(key: cacheKey) { try await Self.fetch(request, session: session) }
+        } catch let TMDBError.transport(message) {
+            if Task.isCancelled { throw CancellationError() }
+            // Stale data beats an empty shelf when the network drops.
+            if let stale = await cache.data(for: cacheKey, maxAge: .infinity), let decoded = try? Self.decode(Response.self, from: stale) {
+                return decoded
+            }
+            throw TMDBError.transport(message)
+        }
+        let decoded: Response
+        do {
+            decoded = try Self.decode(Response.self, from: data)
+        } catch {
+            throw TMDBError.invalidResponse
+        }
+        await cache.store(data, for: cacheKey)
+        return decoded
+    }
+
+    /// One request, retried while TMDB asks us to slow down. Returns the body
+    /// of a successful response.
+    private static func fetch(_ request: URLRequest, session: URLSession) async throws -> Data {
         for attempt in 0 ..< 3 {
             let data: Data
             let response: URLResponse
             do {
                 (data, response) = try await session.data(for: request)
             } catch {
-                if Task.isCancelled { throw CancellationError() }
-                // Stale data beats an empty shelf when the network drops.
-                if let stale = await cache.data(for: cacheKey, maxAge: .infinity), let decoded = try? decoder.decode(Response.self, from: stale) {
-                    return decoded
-                }
                 throw TMDBError.transport(error.localizedDescription)
             }
             guard let http = response as? HTTPURLResponse else { throw TMDBError.invalidResponse }
             switch http.statusCode {
             case 200 ... 299:
-                let decoded: Response
-                do {
-                    decoded = try decoder.decode(Response.self, from: data)
-                } catch {
-                    throw TMDBError.invalidResponse
-                }
-                await cache.store(data, for: cacheKey)
-                return decoded
+                return data
             case 401:
                 throw TMDBError.unauthorized
             case 404:
@@ -198,6 +239,50 @@ actor TMDBClient {
             }
         }
         throw TMDBError.rateLimited
+    }
+}
+
+/// Limits TMDB requests in flight and lets callers that ask for the same
+/// request at the same time share one network round trip.
+actor TMDBRequestGate {
+    private let limit: Int
+    private var running = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var inFlight: [String: (id: UUID, task: Task<Data, Error>)] = [:]
+
+    init(limit: Int) {
+        self.limit = max(limit, 1)
+    }
+
+    func run(key: String, _ work: @escaping @Sendable () async throws -> Data) async throws -> Data {
+        if let shared = inFlight[key] { return try await shared.task.value }
+        let id = UUID()
+        let task = Task {
+            await self.acquire()
+            defer { self.release() }
+            return try await work()
+        }
+        inFlight[key] = (id, task)
+        let result = await task.result
+        if inFlight[key]?.id == id { inFlight[key] = nil }
+        return try result.get()
+    }
+
+    private func acquire() async {
+        if running < limit {
+            running += 1
+            return
+        }
+        // The slot is handed over by `release`, so `running` stays counted.
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    private func release() {
+        if waiters.isEmpty {
+            running -= 1
+        } else {
+            waiters.removeFirst().resume()
+        }
     }
 }
 
