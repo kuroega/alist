@@ -29,6 +29,10 @@ struct ParsedMedia: Codable, Hashable, Sendable {
 /// numbered files inside `Season 1` folders, and `Movie (2014)` / `Movie.2014.1080p`
 /// names, stripping site tags, release groups and encoding junk.
 enum MediaNameParser {
+    /// Stored with every indexed file. Bump it whenever `parse` changes so the
+    /// Gallery store parses its saved files again instead of keeping old titles.
+    static let version = 1
+
     static func parse(path: String) -> ParsedMedia {
         let components = path.split(separator: "/").map(String.init)
         guard let fileName = components.last else {

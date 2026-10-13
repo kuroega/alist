@@ -7,6 +7,7 @@ final class ArtworkPipeline: @unchecked Sendable {
     static let shared = ArtworkPipeline()
 
     private let memory = NSCache<NSURL, UIImage>()
+    private let diskCache: URLCache
     private let session: URLSession
     private let inflight = InflightImages()
 
@@ -14,7 +15,8 @@ final class ArtworkPipeline: @unchecked Sendable {
         memory.totalCostLimit = 220 * 1024 * 1024
         let configuration = URLSessionConfiguration.default
         let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?.appendingPathComponent("Artwork", isDirectory: true)
-        configuration.urlCache = URLCache(memoryCapacity: 24 * 1024 * 1024, diskCapacity: 1024 * 1024 * 1024, directory: directory)
+        diskCache = URLCache(memoryCapacity: 24 * 1024 * 1024, diskCapacity: 1024 * 1024 * 1024, directory: directory)
+        configuration.urlCache = diskCache
         configuration.requestCachePolicy = .returnCacheDataElseLoad
         configuration.httpMaximumConnectionsPerHost = 6
         session = URLSession(configuration: configuration)
@@ -36,6 +38,12 @@ final class ArtworkPipeline: @unchecked Sendable {
             memory.setObject(prepared, forKey: url as NSURL, cost: cost)
             return prepared
         }
+    }
+
+    /// Drops every downloaded image so artwork is fetched again.
+    func removeAll() {
+        memory.removeAllObjects()
+        diskCache.removeAllCachedResponses()
     }
 
     func prefetch(_ urls: [URL]) {

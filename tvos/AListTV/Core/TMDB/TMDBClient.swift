@@ -94,17 +94,18 @@ actor TMDBClient {
         self.cache = cache
     }
 
-    func searchMovies(query: String, year: Int?) async throws -> [TMDBMovieResult] {
+    /// Searches in the client's language, or in `language` when given.
+    func searchMovies(query: String, year: Int?, language: String? = nil) async throws -> [TMDBMovieResult] {
         var items = [URLQueryItem(name: "query", value: query), URLQueryItem(name: "include_adult", value: "false")]
         if let year { items.append(URLQueryItem(name: "year", value: String(year))) }
-        let page: TMDBPage<TMDBMovieResult> = try await get("/search/movie", items, maxAge: Self.week)
+        let page: TMDBPage<TMDBMovieResult> = try await get("/search/movie", items, language: language, maxAge: Self.week)
         return page.results
     }
 
-    func searchShows(query: String, year: Int?) async throws -> [TMDBShowResult] {
+    func searchShows(query: String, year: Int?, language: String? = nil) async throws -> [TMDBShowResult] {
         var items = [URLQueryItem(name: "query", value: query), URLQueryItem(name: "include_adult", value: "false")]
         if let year { items.append(URLQueryItem(name: "first_air_date_year", value: String(year))) }
-        let page: TMDBPage<TMDBShowResult> = try await get("/search/tv", items, maxAge: Self.week)
+        let page: TMDBPage<TMDBShowResult> = try await get("/search/tv", items, language: language, maxAge: Self.week)
         return page.results
     }
 
@@ -144,9 +145,9 @@ actor TMDBClient {
     private static let week: TimeInterval = 7 * 86_400
     private static let month: TimeInterval = 30 * 86_400
 
-    private func get<Response: Decodable>(_ path: String, _ items: [URLQueryItem], maxAge: TimeInterval) async throws -> Response {
+    private func get<Response: Decodable>(_ path: String, _ items: [URLQueryItem], language: String? = nil, maxAge: TimeInterval) async throws -> Response {
         var components = URLComponents(string: "https://api.themoviedb.org/3\(path)")!
-        let queryItems = (items + [URLQueryItem(name: "language", value: language)]).sorted { $0.name < $1.name }
+        let queryItems = (items + [URLQueryItem(name: "language", value: language ?? self.language)]).sorted { $0.name < $1.name }
         let cacheKey = path + "?" + queryItems.map { "\($0.name)=\($0.value ?? "")" }.joined(separator: "&")
 
         if let data = await cache.data(for: cacheKey, maxAge: maxAge), let decoded = try? decoder.decode(Response.self, from: data) {

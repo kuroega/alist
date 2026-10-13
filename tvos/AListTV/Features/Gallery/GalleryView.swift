@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// Media wall: the focused title takes over the screen behind a spotlight,
-/// with Watching, Genres, Unwatched, TV Shows and Movies shelves below.
+/// with Watching, Genres, Unwatched, TV Shows and Movies shelves below, and
+/// an Un-indexed shelf last for videos without an exact TMDB match.
 struct GalleryView: View {
     @ObservedObject var viewModel: GalleryViewModel
     let onReveal: (AListObject) -> Void
@@ -27,10 +28,14 @@ struct GalleryView: View {
     private var content: some View {
         if viewModel.catalog.isEmpty {
             switch viewModel.phase {
+            case .loading:
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityIdentifier("gallery.loading")
             case let .scanning(progress):
                 GalleryScanningView(progress: progress)
             case let .failed(message):
-                emptyState(icon: "wifi.exclamationmark", title: "Couldn’t read your library", message: message, action: "Try Again", perform: viewModel.rescan)
+                emptyState(icon: "wifi.exclamationmark", title: "Couldn’t read your library", message: message, action: "Try Again", perform: viewModel.updateLibrary)
             case .idle, .ready:
                 emptyState(
                     icon: "film.stack",
@@ -67,8 +72,8 @@ struct GalleryView: View {
     private var controls: some View {
         VStack(alignment: .trailing, spacing: 18) {
             HStack(spacing: 18) {
-                Button(action: viewModel.rescan) {
-                    Label("Rescan Library", systemImage: "arrow.clockwise")
+                Button(action: viewModel.updateLibrary) {
+                    Label("Update Library", systemImage: "arrow.clockwise")
                 }
                 .disabled(viewModel.isScanning)
                 .accessibilityIdentifier("gallery.rescan")
@@ -130,6 +135,9 @@ struct GalleryView: View {
                 }
                 if !viewModel.shelves.movies.isEmpty {
                     posterShelf(title: "Movies", titles: viewModel.shelves.movies.map { .movie($0.id) }, collection: .movies)
+                }
+                if !viewModel.shelves.unindexed.isEmpty {
+                    posterShelf(title: "Un-indexed", titles: viewModel.shelves.unindexed, collection: .unindexed)
                 }
             }
             .scrollTargetLayout()
@@ -390,12 +398,12 @@ private struct GalleryStatusLine: View {
 
     private var text: String {
         if case let .scanning(progress) = viewModel.phase {
-            return "Scanning · \(progress.videosFound) videos"
+            return "Updating · \(progress.videosFound) videos"
         }
         if let progress = viewModel.matchProgress {
             return "Matching \(progress.done) of \(progress.total)"
         }
-        if let issue = viewModel.metadataIssue { return issue }
+        if let issue = viewModel.libraryIssue ?? viewModel.metadataIssue { return issue }
         if !viewModel.hasMetadata { return "Add a TMDB key for posters" }
         let count = viewModel.catalog.videoCount
         return "\(count) video\(count == 1 ? "" : "s")"

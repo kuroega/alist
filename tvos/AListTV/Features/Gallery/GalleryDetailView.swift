@@ -245,7 +245,10 @@ struct GalleryDetailView: View {
     private var overview: String {
         let text = movieDetail?.overview ?? showDetail?.overview ?? movie?.overview ?? show?.overview
         if let text, !text.isEmpty { return text }
-        return viewModel.hasMetadata ? "No details were found on TMDB for this title." : "Add a TMDB API key to see posters and details."
+        guard viewModel.hasMetadata else { return "Add a TMDB API key to see posters and details." }
+        if movie?.isIndexed == true || show?.isIndexed == true { return "TMDB has no overview for this title." }
+        if viewModel.isAwaitingMatch(title) { return "This title hasn’t been looked up on TMDB yet." }
+        return "TMDB has no title that exactly matches this file name, so it’s listed under Un-indexed."
     }
 
     // MARK: Actions

@@ -17,9 +17,10 @@ struct GalleryMatch: Codable, Hashable, Sendable {
         GalleryMatch(tmdbID: nil, genreIDs: [], matchedAt: date)
     }
 
-    /// Misses are retried after a few days in case TMDB gained the title.
+    /// Misses are retried after two weeks in case TMDB gained the title;
+    /// hits are kept until metadata is refreshed by hand.
     func isStale(now: Date = Date()) -> Bool {
-        tmdbID == nil && now.timeIntervalSince(matchedAt) > 3 * 86_400
+        tmdbID == nil && now.timeIntervalSince(matchedAt) > 14 * 86_400
     }
 
     var year: Int? { date.flatMap { Int($0.prefix(4)) } }
@@ -61,6 +62,8 @@ struct GalleryMovie: Identifiable, Hashable, Sendable {
     var primaryFile: LibraryFile { files[0] }
     var qualities: [String] { primaryFile.parsed.qualities }
     var paths: [String] { files.map(\.path) }
+    /// Exactly matched on TMDB; otherwise the movie is un-indexed.
+    var isIndexed: Bool { tmdbID != nil }
 }
 
 struct GalleryEpisode: Identifiable, Hashable, Sendable {
@@ -97,6 +100,8 @@ struct GalleryShow: Identifiable, Hashable, Sendable {
     }
 
     var paths: [String] { episodes.map(\.path) }
+    /// Exactly matched on TMDB; otherwise the show is un-indexed.
+    var isIndexed: Bool { tmdbID != nil }
 }
 
 /// The library as titles: movies (with their versions) and shows (with
@@ -116,6 +121,13 @@ struct GalleryCatalog: Sendable {
     func movie(_ id: String) -> GalleryMovie? { movieIndex[id].map { movies[$0] } }
     func show(_ id: String) -> GalleryShow? { showIndex[id].map { shows[$0] } }
     func title(forPath path: String) -> GalleryTitle? { titleByPath[path] }
+
+    func isIndexed(_ title: GalleryTitle) -> Bool {
+        switch title {
+        case let .movie(id): movie(id)?.isIndexed ?? false
+        case let .show(id): show(id)?.isIndexed ?? false
+        }
+    }
 
     func episode(forPath path: String) -> (show: GalleryShow, episode: GalleryEpisode)? {
         guard case let .show(id) = titleByPath[path], let show = show(id),

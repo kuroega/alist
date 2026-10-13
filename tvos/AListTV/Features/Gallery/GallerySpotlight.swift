@@ -196,7 +196,8 @@ extension GalleryViewModel {
         guard spotlight.content == nil else { return }
         if let entry = shelves.playEntries.first {
             focus(entry.title, path: entry.path, section: entry.section)
-        } else if let first = shelves.unwatched.first ?? shelves.movies.first.map({ .movie($0.id) }) ?? shelves.shows.first.map({ .show($0.id) }) {
+        } else if let first = shelves.unwatched.first ?? shelves.movies.first.map({ .movie($0.id) }) ?? shelves.shows.first.map({ .show($0.id) })
+                    ?? shelves.unindexed.first {
             focus(first)
         }
     }

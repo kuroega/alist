@@ -94,6 +94,24 @@ final class AListTVUITests: XCTestCase {
         XCTAssertTrue(app.buttons["player.done"].waitForExistence(timeout: 3))
     }
 
+    func testGalleryListsUnmatchedVideosUnderUnindexed() {
+        login(username: "alice", openBrowse: false)
+        focusAndSelect(app.buttons["home.mode.gallery"], direction: .right)
+
+        // UI tests run without a TMDB key, so nothing has an exact match.
+        XCTAssertTrue(app.staticTexts["Un-indexed"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Movies"].exists)
+        XCTAssertFalse(app.staticTexts["TV Shows"].exists)
+        attachScreenshot(named: "gallery-unindexed")
+
+        focusSpatially(app.buttons["gallery.settings"])
+        remote.press(.select)
+        XCTAssertTrue(app.buttons["gallery.settings.update"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["gallery.settings.rescan"].exists)
+        XCTAssertTrue(app.buttons["gallery.settings.clean-up"].exists)
+        attachScreenshot(named: "gallery-settings")
+    }
+
     func testModeSwitchKeepsBrowseFolder() {
         login(username: "alice")
         focusAndSelect(app.buttons["browser.item./Shows"], direction: .right)

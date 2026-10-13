@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// "See All" wall for one collection (Movies, TV Shows, Unwatched or a genre).
+/// "See All" wall for one collection (Movies, TV Shows, Unwatched, a genre or Un-indexed).
 struct GalleryCollectionView: View {
     @ObservedObject var viewModel: GalleryViewModel
     let collection: GalleryCollection
@@ -56,6 +56,7 @@ struct GalleryCollectionView: View {
     private var eyebrow: String {
         switch collection {
         case .genre: "GENRE"
+        case .unindexed: "NO EXACT TMDB MATCH"
         case .movies, .shows, .unwatched: "LIBRARY"
         }
     }
@@ -65,6 +66,7 @@ struct GalleryCollectionView: View {
 struct GallerySettingsView: View {
     @ObservedObject var viewModel: GalleryViewModel
     @Environment(\.dismiss) private var dismiss
+    @State private var isCleanUpConfirmationPresented = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 34) {
@@ -91,7 +93,7 @@ struct GallerySettingsView: View {
                         .buttonStyle(RowButtonStyle(cornerRadius: 22))
                     }
                 }
-                Text("To pick folders, press and hold a folder in Browse and choose Add to Gallery.")
+                Text("To pick folders, press and hold a folder in Browse and choose Add to Gallery. Updates list only folders that changed; Rescan All lists every one.")
                     .font(.system(size: 21))
                     .foregroundStyle(Theme.tertiaryText)
                     .padding(.horizontal, 24)
@@ -124,34 +126,60 @@ struct GallerySettingsView: View {
 
             HStack(spacing: 24) {
                 Button {
-                    viewModel.rescan()
+                    viewModel.updateLibrary()
                     dismiss()
                 } label: {
-                    Label("Rescan Library", systemImage: "arrow.clockwise")
+                    Label("Update Library", systemImage: "arrow.clockwise")
                 }
                 .buttonStyle(PillButtonStyle(prominence: .primary))
                 .disabled(viewModel.isScanning)
+                .accessibilityIdentifier("gallery.settings.update")
 
                 Button {
-                    viewModel.refreshMetadata()
+                    viewModel.rescanAllFolders()
                     dismiss()
                 } label: {
-                    Label("Refresh Metadata", systemImage: "sparkles")
+                    Label("Rescan All", systemImage: "folder.badge.gearshape")
+                }
+                .buttonStyle(PillButtonStyle())
+                .disabled(viewModel.isScanning)
+                .accessibilityIdentifier("gallery.settings.rescan")
+
+                Button {
+                    isCleanUpConfirmationPresented = true
+                } label: {
+                    Label("Clean Up & Refresh", systemImage: "sparkles")
                 }
                 .buttonStyle(PillButtonStyle())
                 .disabled(!viewModel.hasMetadata)
+                .accessibilityIdentifier("gallery.settings.clean-up")
+                .confirmationDialog(
+                    "Clean up all metadata?",
+                    isPresented: $isCleanUpConfirmationPresented,
+                    titleVisibility: .visible
+                ) {
+                    Button("Clean Up & Refresh", role: .destructive) {
+                        viewModel.cleanUpAndRefreshMetadata()
+                        dismiss()
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("Every TMDB match, cached response and poster is deleted, then every title is looked up on TMDB again. Your videos and watch history are kept.")
+                }
             }
             .padding(.top, 8)
         }
         .padding(60)
-        .frame(width: 1100, alignment: .leading)
+        .frame(width: 1280, alignment: .leading)
         .glassPanel(cornerRadius: 44)
     }
 
     private var summary: String {
-        let movies = viewModel.catalog.movies.count
-        let shows = viewModel.catalog.shows.count
+        let movies = viewModel.shelves.movies.count
+        let shows = viewModel.shelves.shows.count
+        let unindexed = viewModel.shelves.unindexed.count
         var parts = ["\(movies) movie\(movies == 1 ? "" : "s")", "\(shows) show\(shows == 1 ? "" : "s")"]
+        if unindexed > 0 { parts.append("\(unindexed) un-indexed") }
         if let date = viewModel.lastScan { parts.append("scanned \(GalleryFormat.relative(date).lowercased())") }
         return parts.joined(separator: " · ")
     }
