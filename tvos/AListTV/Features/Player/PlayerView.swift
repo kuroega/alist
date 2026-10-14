@@ -1185,9 +1185,8 @@ private struct PanelRowLabel: View {
                     .frame(width: 32)
             }
             VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.system(size: 29, weight: .semibold))
-                    .lineLimit(1)
+                // Long names (e.g. subtitle files) scroll into view while focused.
+                MarqueeText(text: title, font: .system(size: 29, weight: .semibold), isActive: isFocused)
                 if let detail {
                     Text(detail)
                         .font(.system(size: 22, weight: .medium))

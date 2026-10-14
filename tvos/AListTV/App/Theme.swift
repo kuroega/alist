@@ -158,6 +158,76 @@ extension EnvironmentValues {
     }
 }
 
+/// One line of text that, while `isActive` (typically focused) and too wide for
+/// its space, scrolls to reveal the rest the way tvOS titles do: a pause to
+/// read the start, a steady scroll to the end, a pause, then back. Otherwise it
+/// truncates like a plain one-line `Text`.
+struct MarqueeText: View {
+    let text: String
+    let font: Font
+    let isActive: Bool
+
+    @State private var availableWidth: CGFloat = 0
+    @State private var fullWidth: CGFloat = 0
+    @State private var offset: CGFloat = 0
+
+    private static let pointsPerSecond: CGFloat = 70
+    private static let edgeFade: CGFloat = 28
+
+    private var overflow: CGFloat { max(0, fullWidth - availableWidth) }
+    private var isScrolling: Bool { isActive && overflow > 1 }
+
+    var body: some View {
+        Text(text)
+            .font(font)
+            .lineLimit(1)
+            .opacity(isScrolling ? 0 : 1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { availableWidth = $0 }
+            .background(alignment: .leading) {
+                // Measures the untruncated width without affecting layout.
+                Text(text).font(font).lineLimit(1).fixedSize().hidden()
+                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { fullWidth = $0 }
+                    .accessibilityHidden(true)
+            }
+            .overlay(alignment: .leading) {
+                if isScrolling {
+                    Text(text).font(font).lineLimit(1).fixedSize()
+                        .offset(x: offset)
+                        .accessibilityHidden(true)
+                }
+            }
+            .clipped()
+            .mask {
+                // Soften the edges the text scrolls across.
+                HStack(spacing: 0) {
+                    LinearGradient(colors: [.clear, .black], startPoint: .leading, endPoint: .trailing)
+                        .frame(width: isScrolling && offset < 0 ? Self.edgeFade : 0)
+                    Color.black
+                    LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
+                        .frame(width: isScrolling ? Self.edgeFade : 0)
+                }
+            }
+            .task(id: isScrolling ? overflow : 0) { await scroll() }
+    }
+
+    private func scroll() async {
+        withAnimation(.easeOut(duration: 0.25)) { offset = 0 }
+        guard isScrolling else { return }
+        let distance = overflow + Self.edgeFade
+        let duration = Double(distance / Self.pointsPerSecond)
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(1.2))
+            guard !Task.isCancelled else { return }
+            withAnimation(.linear(duration: duration)) { offset = -distance }
+            try? await Task.sleep(for: .seconds(duration + 1.5))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeInOut(duration: 0.45)) { offset = 0 }
+            try? await Task.sleep(for: .seconds(0.45))
+        }
+    }
+}
+
 /// Glass panel container used by player sheets and dialogs.
 struct GlassPanel: ViewModifier {
     var cornerRadius: CGFloat = 36
