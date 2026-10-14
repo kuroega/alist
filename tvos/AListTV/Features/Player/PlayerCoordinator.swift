@@ -454,6 +454,7 @@ final class PlayerCoordinator: ObservableObject {
                 guard !Task.isCancelled, self.sessionID == session else { return }
                 self.externalSubtitles = Self.filteredAndSortedSubtitles(Array(unique.values), videoPath: videoPath)
                 self.externalSubtitleDiscoveryState = .loaded
+                await self.selectMatchingSubtitle(videoPath: videoPath, session: session)
             } catch AListAPIError.unauthorized {
                 guard !Task.isCancelled, self.sessionID == session else { return }
                 await self.onUnauthorized()
@@ -461,6 +462,17 @@ final class PlayerCoordinator: ObservableObject {
                 guard !Task.isCancelled, self.sessionID == session else { return }
                 self.externalSubtitleDiscoveryState = .failed(message: "Unable to load external subtitles.")
             }
+        }
+    }
+
+    /// Turns on the subtitle file named after this video, unless one is
+    /// already chosen. A failed load stays silent: the panel still offers it.
+    private func selectMatchingSubtitle(videoPath: String, session: UUID) async {
+        guard sessionID == session, subtitleSelection == .off,
+              let match = Self.matchingSubtitle(in: externalSubtitles, videoPath: videoPath) else { return }
+        await selectSubtitle(.external(fileID: match.id))
+        if sessionID == session, subtitleSelectionError != nil {
+            subtitleSelectionError = nil
         }
     }
 
@@ -654,20 +666,41 @@ final class PlayerCoordinator: ObservableObject {
         supportedSubtitleExtensions.contains(URL(fileURLWithPath: path).pathExtension.lowercased())
     }
 
+    /// The subtitle that belongs to a video by name: the video's file name
+    /// without its extension, then a dot ("Show.S01E04.mkv" →
+    /// "Show.S01E04.en.srt"). Only formats drawn by the app's overlay qualify,
+    /// so the choice works on either player.
+    static func matchingSubtitle(in options: [ExternalSubtitleOption], videoPath: String) -> ExternalSubtitleOption? {
+        let videoBase = baseName(videoPath)
+        return options.first {
+            isNamed(after: videoBase, title: $0.title)
+                && overlaySubtitleExtensions.contains(URL(fileURLWithPath: $0.title).pathExtension.lowercased())
+        }
+    }
+
+    private static let overlaySubtitleExtensions: Set<String> = ["srt", "ass", "ssa"]
+
+    private static func baseName(_ path: String) -> String {
+        URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent.lowercased()
+    }
+
+    private static func isNamed(after videoBase: String, title: String) -> Bool {
+        let title = title.lowercased()
+        return title == videoBase || title.hasPrefix(videoBase + ".")
+    }
+
     private static func filteredAndSortedSubtitles(_ options: [ExternalSubtitleOption], videoPath: String) -> [ExternalSubtitleOption] {
         let stemsWithIDX = Set(options.filter { $0.title.lowercased().hasSuffix(".idx") }.map { URL(fileURLWithPath: $0.title).deletingPathExtension().lastPathComponent.lowercased() })
         let filtered = options.filter {
             let fileURL = URL(fileURLWithPath: $0.title)
             return fileURL.pathExtension.lowercased() != "sub" || !stemsWithIDX.contains(fileURL.deletingPathExtension().lastPathComponent.lowercased())
         }
-        let videoBase = URL(fileURLWithPath: videoPath).deletingPathExtension().lastPathComponent.lowercased()
+        let videoBase = baseName(videoPath)
         return filtered.sorted {
-            let lhs = $0.title.lowercased()
-            let rhs = $1.title.lowercased()
-            let lhsMatches = lhs == videoBase || lhs.hasPrefix(videoBase + ".")
-            let rhsMatches = rhs == videoBase || rhs.hasPrefix(videoBase + ".")
+            let lhsMatches = isNamed(after: videoBase, title: $0.title)
+            let rhsMatches = isNamed(after: videoBase, title: $1.title)
             if lhsMatches != rhsMatches { return lhsMatches }
-            return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
+            return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
         }
     }
 

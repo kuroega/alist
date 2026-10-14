@@ -125,6 +125,7 @@ final class PlayerCoordinatorTests: XCTestCase {
         let api = PlayerFakeAPI(
             details: [
                 detail(url: "https://media.example/episode-1", path: "/Episode 1.mp4"),
+                detail(url: "https://media.example/episode-1.srt", path: "/Episode 1.srt"),
                 detail(url: "https://media.example/episode-2", path: "/Episode 2.mp3")
             ],
             repeatingListByPath: ["/": [
@@ -149,7 +150,8 @@ final class PlayerCoordinatorTests: XCTestCase {
         try await waitUntil { player.replacedURLs.count == 2 }
 
         let paths = await api.getPaths
-        XCTAssertEqual(paths, ["/Episode 1.mp4", "/Episode 2.mp3"])
+        // "Episode 1.srt" is named after the video, so it is auto-selected.
+        XCTAssertEqual(paths, ["/Episode 1.mp4", "/Episode 1.srt", "/Episode 2.mp3"])
         XCTAssertEqual(coordinator.nowPlayingPath, "/Episode 2.mp3")
         XCTAssertEqual(player.playCount, 2)
     }
@@ -414,17 +416,71 @@ final class PlayerCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.externalSubtitles.map(\.title), ["Movie.en.srt", "Movie.idx", "Other.ass"])
     }
 
-    func testNextFileStartsWithoutPreviousSubtitleCues() async throws {
+    func testAutoSelectsSubtitleNamedAfterTheVideo() async throws {
         let api = PlayerFakeAPI(
             details: [
                 detail(url: "https://media.example/Movie.mp4", path: "/Movie.mp4"),
+                detail(url: "https://media.example/Movie.en.srt", path: "/Movie.en.srt")
+            ],
+            listPages: [[
+                AListObject(virtualPath: "/Another Movie.srt", name: "Another Movie.srt", isDirectory: false),
+                AListObject(virtualPath: "/Movie.en.srt", name: "Movie.en.srt", isDirectory: false)
+            ]]
+        )
+        let player = PlayerFakeController()
+        let coordinator = makeCoordinator(api: api, player: player)
+
+        await coordinator.play(object: object("/Movie.mp4"))
+        try await waitUntil { coordinator.subtitleSelection == .external(fileID: "/Movie.en.srt") }
+
+        XCTAssertEqual(coordinator.subtitleOverlay.cues.map(\.text), ["Native SRT subtitle"])
+        XCTAssertNil(coordinator.subtitleSelectionError)
+    }
+
+    func testMatchingSubtitleRequiresTheVideoNameAndAnOverlayFormat() {
+        func options(_ titles: String...) -> [ExternalSubtitleOption] {
+            titles.map { ExternalSubtitleOption(id: "/" + $0, virtualPath: "/" + $0, title: $0) }
+        }
+        let video = "/Show/Monster： The Story.S01E04.2160p.mkv"
+        XCTAssertEqual(
+            PlayerCoordinator.matchingSubtitle(in: options("Monster： The Story.S01E03.2160p.en.srt", "monster： the story.s01e04.2160p.EN.SRT"), videoPath: video)?.title,
+            "monster： the story.s01e04.2160p.EN.SRT", "case-insensitive prefix plus a dot"
+        )
+        XCTAssertNil(PlayerCoordinator.matchingSubtitle(in: options("Monster： The Story.S01E04.2160p.idx"), videoPath: video),
+                     "formats the player must load are left to the user")
+        XCTAssertNil(PlayerCoordinator.matchingSubtitle(in: options("Monster： The Story.S01E04.2160pX.srt"), videoPath: video),
+                     "the video name must end at a dot")
+    }
+
+    func testAutoSelectFailureStaysSilentAndOff() async throws {
+        let api = PlayerFakeAPI(
+            details: [
+                detail(url: "https://media.example/Clip.mp4", path: "/Clip.mp4"),
+                detail(url: "https://media.example/Clip.srt", path: "/Clip.srt")
+            ],
+            listPages: [[AListObject(virtualPath: "/Clip.srt", name: "Clip.srt", isDirectory: false)]]
+        )
+        let coordinator = makeCoordinator(api: api, player: PlayerFakeController())
+
+        await coordinator.play(object: object("/Clip.mp4"))
+        try await waitUntil { coordinator.externalSubtitleDiscoveryState == .loaded }
+        let paths = await api.getPaths
+        XCTAssertEqual(paths, ["/Clip.mp4", "/Clip.srt"])
+        XCTAssertEqual(coordinator.subtitleSelection, .off)
+        XCTAssertNil(coordinator.subtitleSelectionError, "an automatic choice must not surface an error")
+    }
+
+    func testNextFileStartsWithoutPreviousSubtitleCues() async throws {
+        let api = PlayerFakeAPI(
+            details: [
+                detail(url: "https://media.example/Feature.mp4", path: "/Feature.mp4"),
                 detail(url: "https://media.example/Movie.en.srt", path: "/Movie.en.srt"),
                 detail(url: "https://media.example/E02.mp4", path: "/E02.mp4")
             ],
             listPages: [[AListObject(virtualPath: "/Movie.en.srt", name: "Movie.en.srt", isDirectory: false)], []]
         )
         let coordinator = makeCoordinator(api: api, player: PlayerFakeController())
-        await coordinator.play(object: object("/Movie.mp4"))
+        await coordinator.play(object: object("/Feature.mp4"))
         try await waitUntil { coordinator.externalSubtitleDiscoveryState == .loaded }
         await coordinator.selectSubtitle(.external(fileID: "/Movie.en.srt"))
         XCTAssertFalse(coordinator.subtitleOverlay.cues.isEmpty)
@@ -438,7 +494,7 @@ final class PlayerCoordinatorTests: XCTestCase {
     func testExternalSubtitleSelectionResolvesSecureURL() async throws {
         let api = PlayerFakeAPI(
             details: [
-                detail(url: "https://media.example/Movie.mp4", path: "/Movie.mp4"),
+                detail(url: "https://media.example/Feature.mp4", path: "/Feature.mp4"),
                 detail(url: "https://media.example/Movie.en.srt", path: "/Movie.en.srt")
             ],
             listPages: [[AListObject(virtualPath: "/Movie.en.srt", name: "Movie.en.srt", isDirectory: false)]]
@@ -446,7 +502,7 @@ final class PlayerCoordinatorTests: XCTestCase {
         let player = PlayerFakeController()
         let coordinator = makeCoordinator(api: api, player: player)
 
-        await coordinator.play(object: object("/Movie.mp4"))
+        await coordinator.play(object: object("/Feature.mp4"))
         try await waitUntil { coordinator.externalSubtitleDiscoveryState == .loaded }
         await coordinator.selectSubtitle(.external(fileID: "/Movie.en.srt"))
 
@@ -458,7 +514,7 @@ final class PlayerCoordinatorTests: XCTestCase {
     func testInvalidExternalSubtitleURLPreservesCurrentSelection() async throws {
         let api = PlayerFakeAPI(
             details: [
-                detail(url: "https://media.example/Movie.mp4", path: "/Movie.mp4"),
+                detail(url: "https://media.example/Feature.mp4", path: "/Feature.mp4"),
                 detail(url: "http://media.example/Movie.srt", path: "/Movie.srt")
             ],
             listPages: [[AListObject(virtualPath: "/Movie.srt", name: "Movie.srt", isDirectory: false)]]
@@ -467,7 +523,7 @@ final class PlayerCoordinatorTests: XCTestCase {
         player.embeddedSubtitleTracks = [PlaybackTrackOption(id: "embedded.en", title: "English", languageCode: "en", codec: "WebVTT", isSelected: false)]
         let coordinator = makeCoordinator(api: api, player: player)
 
-        await coordinator.play(object: object("/Movie.mp4"))
+        await coordinator.play(object: object("/Feature.mp4"))
         try await waitUntil { coordinator.externalSubtitleDiscoveryState == .loaded }
         await coordinator.selectSubtitle(.embedded(trackID: "embedded.en"))
         await coordinator.selectSubtitle(.external(fileID: "/Movie.srt"))
@@ -480,7 +536,7 @@ final class PlayerCoordinatorTests: XCTestCase {
     func testInvalidNativeSubtitlePreservesEmbeddedSelection() async throws {
         let api = PlayerFakeAPI(
             details: [
-                detail(url: "https://media.example/Movie.mp4", path: "/Movie.mp4"),
+                detail(url: "https://media.example/Feature.mp4", path: "/Feature.mp4"),
                 detail(url: "https://media.example/Movie.srt", path: "/Movie.srt")
             ],
             listPages: [[AListObject(virtualPath: "/Movie.srt", name: "Movie.srt", isDirectory: false)]]
@@ -491,7 +547,7 @@ final class PlayerCoordinatorTests: XCTestCase {
             throw AListAPIError.invalidResponse
         })
 
-        await coordinator.play(object: object("/Movie.mp4"))
+        await coordinator.play(object: object("/Feature.mp4"))
         try await waitUntil { coordinator.externalSubtitleDiscoveryState == .loaded }
         await coordinator.selectSubtitle(.embedded(trackID: "embedded.en"))
         await coordinator.selectSubtitle(.external(fileID: "/Movie.srt"))
@@ -580,9 +636,8 @@ final class PlayerCoordinatorTests: XCTestCase {
         let coordinator = makeCoordinator(api: api, player: player)
 
         await coordinator.play(object: object("/Movie.mp4"))
-        try await waitUntil { coordinator.externalSubtitleDiscoveryState == .loaded }
-        await coordinator.selectSubtitle(.external(fileID: "/Movie.srt"))
-        XCTAssertEqual(coordinator.subtitleSelection, .external(fileID: "/Movie.srt"))
+        // "Movie.srt" is named after the video, so it is selected automatically.
+        try await waitUntil { coordinator.subtitleSelection == .external(fileID: "/Movie.srt") }
 
         // Trigger refresh via failure
         player.emit(.failed(message: "expired"))
@@ -609,7 +664,7 @@ final class PlayerCoordinatorTests: XCTestCase {
     func testCancellationSuppressesSubtitleErrors() async throws {
         let api = PlayerFakeAPI(
             details: [
-                detail(url: "https://media.example/Movie.mp4", path: "/Movie.mp4"),
+                detail(url: "https://media.example/Feature.mp4", path: "/Feature.mp4"),
                 detail(url: "https://media.example/Movie.srt", path: "/Movie.srt")
             ],
             listPages: [[AListObject(virtualPath: "/Movie.srt", name: "Movie.srt", isDirectory: false)]],
@@ -619,7 +674,7 @@ final class PlayerCoordinatorTests: XCTestCase {
         let player = PlayerFakeController()
         let coordinator = makeCoordinator(api: api, player: player)
 
-        await coordinator.play(object: object("/Movie.mp4"))
+        await coordinator.play(object: object("/Feature.mp4"))
         try await waitUntil { coordinator.externalSubtitleDiscoveryState == .loaded }
 
         let selectTask = Task { @MainActor in
