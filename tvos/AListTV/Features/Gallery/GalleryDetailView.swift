@@ -8,6 +8,7 @@ struct GalleryDetailView: View {
     let focusPath: String?
     let onReveal: (AListObject) -> Void
 
+    @Environment(\.dismiss) private var dismiss
     @State private var movieDetail: TMDBMovieDetail?
     @State private var showDetail: TMDBShowDetail?
     @State private var selectedSeason: Int?
@@ -29,6 +30,7 @@ struct GalleryDetailView: View {
                     VStack(alignment: .leading, spacing: 0) {
                         hero
                             .frame(minHeight: show == nil ? 900 : 760, alignment: .bottomLeading)
+                            .overlay(alignment: .topLeading) { backButton }
                             .padding(.bottom, 48)
                         lowerSections(proxy: proxy)
                     }
@@ -153,7 +155,8 @@ struct GalleryDetailView: View {
                 .padding(.top, 14)
         }
         .padding(.horizontal, Theme.screenPadding + 20)
-        .padding(.top, 120)
+        // Clears the Back button even when a tall logo pushes past the min height.
+        .padding(.top, 180)
     }
 
     @ViewBuilder
@@ -252,6 +255,17 @@ struct GalleryDetailView: View {
     }
 
     // MARK: Actions
+
+    /// Visible way out alongside the remote's Menu button; Up from the actions reaches it.
+    private var backButton: some View {
+        Button { dismiss() } label: {
+            Label("Back", systemImage: "chevron.left")
+        }
+        .galleryActionStyle(prominent: false)
+        .accessibilityIdentifier("gallery.detail.back")
+        .padding(.horizontal, Theme.screenPadding + 20)
+        .padding(.top, 60)
+    }
 
     private var actions: some View {
         HStack(alignment: .top, spacing: 24) {
