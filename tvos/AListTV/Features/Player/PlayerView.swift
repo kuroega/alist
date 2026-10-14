@@ -1326,6 +1326,7 @@ private struct PlaybackDiagnosticsPanel: View {
                 Button("Close", action: close).buttonStyle(PillButtonStyle())
             }
             group("Playback", [
+                ("Player", snapshot.engine.title),
                 ("Time", time(snapshot.currentTime) + " / " + time(snapshot.duration)),
                 ("Playing", snapshot.isPlaying ? "Yes" : "No"),
                 ("Seekable", snapshot.isSeekable ? "Yes" : "No")

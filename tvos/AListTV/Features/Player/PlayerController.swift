@@ -51,7 +51,21 @@ enum SubtitleSelection: Equatable, Sendable {
     case external(fileID: String)
 }
 
+/// The player rendering the current file, shown in Stats for Nerds.
+enum PlaybackEngine: Equatable, Sendable {
+    case vlc
+    case native
+
+    var title: String {
+        switch self {
+        case .vlc: "VLC (VLCKit)"
+        case .native: "Apple AVPlayer (Dolby Vision)"
+        }
+    }
+}
+
 struct PlaybackDiagnosticsSnapshot: Equatable, Sendable {
+    let engine: PlaybackEngine
     let currentTime: TimeInterval
     let duration: TimeInterval
     let isPlaying: Bool

@@ -484,6 +484,7 @@ final class AListTVUITests: XCTestCase {
         XCTAssertTrue(panel.waitForExistence(timeout: 3))
 
         let diagnosticsTree = panel.debugDescription
+        XCTAssertTrue(diagnosticsTree.contains("VLC (VLCKit)"), "The playing engine should be visible")
         XCTAssertTrue(diagnosticsTree.contains("1920×1080") || diagnosticsTree.contains("1920\u{00d7}1080"), "Resolution should be visible")
         XCTAssertTrue(diagnosticsTree.contains("H.264"), "Video codec should be visible")
         XCTAssertTrue(diagnosticsTree.contains("AAC"), "Audio codec should be visible")

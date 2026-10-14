@@ -194,7 +194,7 @@ final class NativePlayerControllerAdapter: NSObject, ObservableObject, PlayerCon
         let size = item?.presentationSize ?? .zero
         let frameRate = item?.tracks.first(where: { $0.assetTrack?.mediaType == .video })?.currentVideoFrameRate
         return PlaybackDiagnosticsSnapshot(
-            currentTime: currentTime, duration: duration, isPlaying: isPlaying, isSeekable: isSeekable,
+            engine: .native, currentTime: currentTime, duration: duration, isPlaying: isPlaying, isSeekable: isSeekable,
             inputBytesRead: access?.numberOfBytesTransferred ?? 0,
             inputBitrate: max(0, (access?.observedBitrate ?? 0) / 8),
             demuxBytesRead: 0, demuxBitrate: max(0, (access?.indicatedBitrate ?? 0) / 8),
@@ -204,7 +204,7 @@ final class NativePlayerControllerAdapter: NSObject, ObservableObject, PlayerCon
             playedAudioBuffers: 0, lostAudioBuffers: 0,
             videoResolution: size == .zero ? nil : "\(Int(size.width))×\(Int(size.height))",
             videoFrameRate: frameRate.map(Double.init).flatMap { $0 > 0 ? $0 : nil },
-            videoCodec: "Dolby Vision (AVPlayer)",
+            videoCodec: "Dolby Vision",
             audioTitle: nil, audioLanguageCode: nil, audioCodec: "AAC",
             subtitleTitle: nil, subtitleLanguageCode: nil, subtitleCodec: nil
         )

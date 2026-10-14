@@ -336,7 +336,7 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
         let video = selectedVideo?.video
         let frameRate = video.flatMap { PlaybackPresentation.frameRate(numerator: $0.frameRate, denominator: $0.frameRateDenominator) }
         return PlaybackDiagnosticsSnapshot(
-            currentTime: currentTime, duration: duration, isPlaying: isPlaying, isSeekable: isSeekable,
+            engine: .vlc, currentTime: currentTime, duration: duration, isPlaying: isPlaying, isSeekable: isSeekable,
             inputBytesRead: Int64(statistics?.readBytes ?? 0), inputBitrate: Double(statistics?.inputBitrate ?? 0),
             demuxBytesRead: Int64(statistics?.demuxReadBytes ?? 0), demuxBitrate: Double(statistics?.demuxBitrate ?? 0),
             demuxCorrupted: Int64(statistics?.demuxCorrupted ?? 0), demuxDiscontinuity: Int64(statistics?.demuxDiscontinuity ?? 0),
