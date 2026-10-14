@@ -54,16 +54,25 @@ func ClosePlayback() {
 	}
 }
 
+// DolbyVisionPlayback offers a stream that keeps Dolby Vision metadata, for
+// clients that can render it (AVPlayer). It is present only when the metadata
+// is required for correct color; see playback.Session.DolbyVision.
+type DolbyVisionPlayback struct {
+	URL     string `json:"url"`
+	Profile uint8  `json:"profile"`
+	Level   uint8  `json:"level"`
+}
+
 // compatiblePlaybackURL is called only after FsGet has checked the user's
 // path, roles and folder password. The opaque URL delegates that read access
 // to the media player until the session expires; it grants no browse access.
-func compatiblePlaybackURL(c *gin.Context, user *model.User, rawPath string, obj model.Obj) (string, error) {
+func compatiblePlaybackURL(c *gin.Context, user *model.User, rawPath string, obj model.Obj) (string, *DolbyVisionPlayback, error) {
 	if playbackManager == nil || !conf.Conf.Playback.Enabled || !strings.EqualFold(path.Ext(obj.GetName()), ".mkv") {
-		return "", nil
+		return "", nil, nil
 	}
 	port := conf.Conf.Scheme.HttpPort
 	if port <= 0 || conf.Conf.Scheme.ForceHttps {
-		return "", errors.New("compatible playback requires the local HTTP listener without forced HTTPS")
+		return "", nil, errors.New("compatible playback requires the local HTTP listener without forced HTTPS")
 	}
 	// Never derive this URL from Host or forwarded headers. The /p route retains
 	// all existing signature and storage proxy checks and refreshes cloud links.
@@ -78,12 +87,17 @@ func compatiblePlaybackURL(c *gin.Context, user *model.User, rawPath string, obj
 	key := fmt.Sprintf("%d\x00%s\x00%d:%d", user.ID, rawPath, obj.GetSize(), obj.ModTime().UnixNano())
 	session, err := playbackManager.Open(c.Request.Context(), key, source.String(), obj.GetSize())
 	if errors.Is(err, playback.ErrNotNeeded) {
-		return "", nil
+		return "", nil, nil
 	}
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return common.GetApiUrl(c.Request) + "/playback/" + session.ID + "/index.m3u8", nil
+	base := common.GetApiUrl(c.Request) + "/playback/" + session.ID + "/"
+	var dolbyVision *DolbyVisionPlayback
+	if dv := session.DolbyVision(); dv != nil {
+		dolbyVision = &DolbyVisionPlayback{URL: base + "dv-index.m3u8", Profile: dv.Profile, Level: dv.Level}
+	}
+	return base + "index.m3u8", dolbyVision, nil
 }
 
 // Playback serves only capabilities created by the authenticated FsGet path.
@@ -119,13 +133,22 @@ func Playback(c *gin.Context) {
 		c.String(http.StatusGone, "Playback session expired; reopen the file")
 		return
 	}
-	if resource == "index.m3u8" {
+	// "dv-" resources are the Dolby Vision variant of the same session.
+	variant, name := playback.Compatible, resource
+	if rest, ok := strings.CutPrefix(resource, "dv-"); ok {
+		if session.DolbyVision() == nil {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		variant, name = playback.DolbyVision, rest
+	}
+	if name == "index.m3u8" {
 		c.Header("Content-Type", "application/vnd.apple.mpegurl")
-		http.ServeContent(c.Writer, c.Request, resource, time.Time{}, bytes.NewReader(session.Playlist()))
+		http.ServeContent(c.Writer, c.Request, resource, time.Time{}, bytes.NewReader(session.Playlist(variant)))
 		return
 	}
-	if resource == "init.mp4" {
-		data, err := playbackManager.Init(c.Request.Context(), id)
+	if name == "init.mp4" {
+		data, err := playbackManager.Init(c.Request.Context(), id, variant)
 		if err != nil {
 			if errors.Is(err, playback.ErrExpired) {
 				c.String(http.StatusGone, "Playback session expired; reopen the file")
@@ -138,7 +161,7 @@ func Playback(c *gin.Context) {
 		http.ServeContent(c.Writer, c.Request, resource, time.Time{}, bytes.NewReader(data))
 		return
 	}
-	indexText, ok := strings.CutSuffix(resource, ".m4s")
+	indexText, ok := strings.CutSuffix(name, ".m4s")
 	index, parseErr := strconv.Atoi(indexText)
 	if !ok || parseErr != nil || index < 0 || strconv.Itoa(index) != indexText || index >= len(session.Index.Boundaries)-1 {
 		c.Status(http.StatusNotFound)
@@ -157,7 +180,7 @@ func Playback(c *gin.Context) {
 		c.String(http.StatusServiceUnavailable, "Playback transfer capacity reached")
 		return
 	}
-	data, err := playbackManager.Segment(c.Request.Context(), id, index)
+	data, err := playbackManager.Segment(c.Request.Context(), id, variant, index)
 	if err != nil {
 		switch {
 		case errors.Is(err, playback.ErrBusy):

@@ -20,9 +20,35 @@ type Index struct {
 	Boundaries []float64
 	VideoCodec string
 	AudioCodec string
+	// DolbyVision is the selected video track's configuration record, or nil.
+	DolbyVision *DolbyVisionConfig
 	// Seek inside the boundary's first GOP, not exactly on its cue. FFmpeg's
 	// DTS seek heuristic can otherwise select the preceding GOP for B-frames.
 	seekTimes []float64
+}
+
+// DolbyVisionConfig mirrors a DOVIDecoderConfigurationRecord (ETSI GS CCM 001).
+type DolbyVisionConfig struct {
+	Profile, Level uint8
+	// Compatibility is dv_bl_signal_compatibility_id: 0 means the base layer
+	// is not viewable without the RPU (profile 5's IPTPQc2), 1 is HDR10.
+	Compatibility uint8
+	RPU, EL, BL   bool
+}
+
+// parseDolbyVision decodes the fixed leading bytes of a dvcC/dvvC record.
+func parseDolbyVision(record []byte) *DolbyVisionConfig {
+	if len(record) < 5 {
+		return nil
+	}
+	return &DolbyVisionConfig{
+		Profile:       record[2] >> 1,
+		Level:         (record[2]&1)<<5 | record[3]>>3,
+		RPU:           record[3]&0x04 != 0,
+		EL:            record[3]&0x02 != 0,
+		BL:            record[3]&0x01 != 0,
+		Compatibility: record[4] >> 4,
+	}
 }
 
 const (
@@ -363,6 +389,7 @@ func buildIndex(info, tracks, cues []byte, segmentSize int64) (Index, error) {
 		codec := ""
 		trackScale := float64(1)
 		var offset, delay uint64
+		var dolbyVision *DolbyVisionConfig
 		if err := indexFields(entry, func(field uint64, value []byte) error {
 			var err error
 			switch field {
@@ -381,6 +408,8 @@ func buildIndex(info, tracks, cues []byte, segmentSize int64) (Index, error) {
 				offset, err = indexUint(value)
 			case 0x56AA:
 				delay, err = indexUint(value)
+			case 0x41E4: // BlockAdditionMapping
+				dolbyVision = blockAdditionDolbyVision(value)
 			}
 			return err
 		}); err != nil || number == 0 || kind == 0 || codec == "" || seenTracks[number] {
@@ -394,6 +423,7 @@ func buildIndex(info, tracks, cues []byte, segmentSize int64) (Index, error) {
 			}
 			videoTrack = number
 			result.VideoCodec = normalizeCodec(codec)
+			result.DolbyVision = dolbyVision
 		}
 		if kind == 2 && !haveAudio {
 			haveAudio = true
@@ -481,6 +511,26 @@ func buildIndex(info, tracks, cues []byte, segmentSize int64) (Index, error) {
 		result.seekTimes[n] = start + (next-start)/2
 	}
 	return result, nil
+}
+
+// blockAdditionDolbyVision returns the Dolby Vision configuration carried by
+// a BlockAdditionMapping, or nil for other (or malformed) block additions.
+func blockAdditionDolbyVision(mapping []byte) *DolbyVisionConfig {
+	var kind uint64
+	var record []byte
+	if indexFields(mapping, func(field uint64, value []byte) error {
+		var err error
+		switch field {
+		case 0x41E7: // BlockAddIDType
+			kind, err = indexUint(value)
+		case 0x41ED: // BlockAddIDExtraData
+			record = value
+		}
+		return err
+	}) != nil || (kind != 0x64766343 && kind != 0x64767643) { // 'dvcC', 'dvvC'
+		return nil
+	}
+	return parseDolbyVision(record)
 }
 
 func normalizeCodec(codec string) string {

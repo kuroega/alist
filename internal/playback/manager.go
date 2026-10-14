@@ -66,24 +66,67 @@ type Session struct {
 	lastAccess time.Time
 	ctx        context.Context
 	cancel     context.CancelFunc
-	segments   map[int]*segmentCall
-	// init is the shared fMP4 initialization segment (ftyp+moov) served as
-	// EXT-X-MAP. HLS media segments must not carry their own init data, so it
-	// is captured from the first encoded segment and reused for the session.
-	init []byte
+	segments   map[segmentKey]*segmentCall
+	// init holds each variant's shared fMP4 initialization segment (ftyp+moov)
+	// served as EXT-X-MAP. HLS media segments must not carry their own init
+	// data, so it is captured from the first encoded segment and reused.
+	init [variantCount][]byte
+}
+
+// Variant selects how a session packages its video. Both variants share the
+// probe, source cache and timeline; only the bitstream handling differs.
+type Variant uint8
+
+const (
+	// Compatible strips Dolby Vision RPUs, leaving the HDR10/SDR base layer
+	// that any HEVC decoder renders (VLC, browsers).
+	Compatible Variant = iota
+	// DolbyVision keeps the RPUs in a dvh1 sample entry for players with a
+	// Dolby Vision pipeline (AVPlayer). Offered only where it is required:
+	// see Session.DolbyVision.
+	DolbyVision
+	variantCount
+)
+
+// resourcePrefix namespaces a variant's playlist entries; Compatible keeps the
+// original unprefixed names so existing clients are unaffected.
+func (v Variant) resourcePrefix() string {
+	if v == DolbyVision {
+		return "dv-"
+	}
+	return ""
+}
+
+// DolbyVision returns the source's Dolby Vision configuration when the
+// DolbyVision variant is available. That is profile 5 only: its single-layer
+// base is IPTPQc2, which has no HDR10/SDR fallback, so stripping the RPU (the
+// Compatible variant) yields green and magenta video. Profile 8 bases are
+// HDR10 and dual-layer profile 7 needs its enhancement layer, so both stay on
+// the Compatible variant.
+func (s *Session) DolbyVision() *DolbyVisionConfig {
+	dv := s.Index.DolbyVision
+	if s.Index.VideoCodec != "hevc" || dv == nil || dv.Profile != 5 || !dv.BL || !dv.RPU || dv.EL {
+		return nil
+	}
+	return dv
+}
+
+func (s *Session) offers(variant Variant) bool {
+	return variant == Compatible || (variant == DolbyVision && s.DolbyVision() != nil)
 }
 
 // Playlist uses the continuous timeline applied by shiftSegmentTimeline.
 // Each encoder run must first trim seek preroll to its indexed interval.
-func (s *Session) Playlist() []byte {
+func (s *Session) Playlist(variant Variant) []byte {
+	prefix := variant.resourcePrefix()
 	var b strings.Builder
 	longest := 0.0
 	for n := 1; n < len(s.Index.Boundaries); n++ {
 		longest = math.Max(longest, s.Index.Boundaries[n]-s.Index.Boundaries[n-1])
 	}
-	fmt.Fprintf(&b, "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:%.0f\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MAP:URI=\"init.mp4\"\n", math.Ceil(longest))
+	fmt.Fprintf(&b, "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:%.0f\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MAP:URI=\"%sinit.mp4\"\n", math.Ceil(longest), prefix)
 	for n := 0; n+1 < len(s.Index.Boundaries); n++ {
-		fmt.Fprintf(&b, "#EXTINF:%s,\n%d.m4s\n", seconds(s.Index.Boundaries[n+1]-s.Index.Boundaries[n]), n)
+		fmt.Fprintf(&b, "#EXTINF:%s,\n%s%d.m4s\n", seconds(s.Index.Boundaries[n+1]-s.Index.Boundaries[n]), prefix, n)
 	}
 	b.WriteString("#EXT-X-ENDLIST\n")
 	return []byte(b.String())
@@ -102,9 +145,14 @@ type segmentCall struct {
 	err  error
 }
 
+type segmentKey struct {
+	variant Variant
+	n       int
+}
+
 type cacheKey struct {
 	id string
-	n  int
+	segmentKey
 }
 
 type cacheEntry struct {
@@ -304,7 +352,7 @@ func (m *Manager) Open(ctx context.Context, key, sourceURL string, size int64) (
 			s := &Session{
 				ID: id, Index: index,
 				key: key, identity: identity, sourceURL: playbackSource, source: cachedSource, lastAccess: m.now(),
-				ctx: sessionCtx, cancel: sessionCancel, segments: make(map[int]*segmentCall),
+				ctx: sessionCtx, cancel: sessionCancel, segments: make(map[segmentKey]*segmentCall),
 			}
 			m.sessions[s.ID] = s
 			m.keys[key] = s
@@ -435,7 +483,7 @@ func (m *Manager) Source(w http.ResponseWriter, r *http.Request, id string) erro
 // Segment returns immutable cached bytes, or encodes just the requested interval.
 // The first request owns an encode; abandoning it cancels that process and wakes
 // duplicate waiters with an explicit error, rather than leaving background work.
-func (m *Manager) Segment(ctx context.Context, id string, n int) ([]byte, error) {
+func (m *Manager) Segment(ctx context.Context, id string, variant Variant, n int) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -446,19 +494,20 @@ func (m *Manager) Segment(ctx context.Context, id string, n int) ([]byte, error)
 		m.mu.Unlock()
 		return nil, ErrExpired
 	}
-	if n < 0 || n >= len(s.Index.Boundaries)-1 {
+	if n < 0 || n >= len(s.Index.Boundaries)-1 || !s.offers(variant) {
 		m.mu.Unlock()
 		return nil, errors.New("invalid playback segment")
 	}
 	s.lastAccess = m.now()
-	key := cacheKey{id, n}
+	segment := segmentKey{variant, n}
+	key := cacheKey{id, segment}
 	if entry := m.cache[key]; entry != nil {
 		m.lru.MoveToFront(entry)
 		data := entry.Value.(cacheEntry).data
 		m.mu.Unlock()
 		return data, nil
 	}
-	if call := s.segments[n]; call != nil {
+	if call := s.segments[segment]; call != nil {
 		m.mu.Unlock()
 		select {
 		case <-ctx.Done():
@@ -474,7 +523,7 @@ func (m *Manager) Segment(ctx context.Context, id string, n int) ([]byte, error)
 		return nil, ErrBusy
 	}
 	call := &segmentCall{done: make(chan struct{})}
-	s.segments[n] = call
+	s.segments[segment] = call
 	sourceURL := s.sourceURL
 	start := s.Index.Boundaries[n]
 	duration := s.Index.Boundaries[n+1] - start
@@ -485,7 +534,7 @@ func (m *Manager) Segment(ctx context.Context, id string, n int) ([]byte, error)
 	encodeCtx, cancel := context.WithTimeout(ctx, encodeTimeout)
 	stop := context.AfterFunc(s.ctx, cancel)
 	encodeStart := time.Now()
-	data, err := m.encode(encodeCtx, cancel, sourceURL, videoCodec, seek, start, duration)
+	data, err := m.encode(encodeCtx, cancel, sourceURL, videoCodec, variant, seek, start, duration)
 	if err == nil {
 		err = encodeCtx.Err()
 	}
@@ -510,15 +559,15 @@ func (m *Manager) Segment(ctx context.Context, id string, n int) ([]byte, error)
 
 	m.mu.Lock()
 	<-m.slots
-	delete(s.segments, n)
+	delete(s.segments, segment)
 	if m.closed || m.sessions[id] != s {
 		err = ErrExpired
 	}
 	if err == nil {
-		if s.init == nil {
+		if s.init[variant] == nil {
 			if init, _, ok := splitInit(data); ok {
 				// Copy: the init must not pin the whole segment buffer in memory.
-				s.init = append([]byte(nil), init...)
+				s.init[variant] = append([]byte(nil), init...)
 			}
 		}
 		m.cacheSegmentLocked(key, data)
@@ -533,7 +582,7 @@ func (m *Manager) Segment(ctx context.Context, id string, n int) ([]byte, error)
 // Init returns the shared fMP4 initialization segment (ftyp+moov) for a
 // session's EXT-X-MAP. It is captured from the first successfully encoded
 // segment; if none is available yet it encodes segment 0 to derive one.
-func (m *Manager) Init(ctx context.Context, id string) ([]byte, error) {
+func (m *Manager) Init(ctx context.Context, id string, variant Variant) ([]byte, error) {
 	m.mu.Lock()
 	m.expireLocked()
 	s := m.sessions[id]
@@ -541,13 +590,17 @@ func (m *Manager) Init(ctx context.Context, id string) ([]byte, error) {
 		m.mu.Unlock()
 		return nil, ErrExpired
 	}
-	if s.init != nil {
-		data := s.init
+	if !s.offers(variant) {
+		m.mu.Unlock()
+		return nil, errors.New("invalid playback variant")
+	}
+	if s.init[variant] != nil {
+		data := s.init[variant]
 		m.mu.Unlock()
 		return data, nil
 	}
 	m.mu.Unlock()
-	if _, err := m.Segment(ctx, id, 0); err != nil {
+	if _, err := m.Segment(ctx, id, variant, 0); err != nil {
 		return nil, err
 	}
 	m.mu.Lock()
@@ -557,22 +610,29 @@ func (m *Manager) Init(ctx context.Context, id string) ([]byte, error) {
 	if s == nil || m.closed {
 		return nil, ErrExpired
 	}
-	if s.init == nil {
+	if s.init[variant] == nil {
 		return nil, errors.New("playback initialization segment unavailable")
 	}
-	return s.init, nil
+	return s.init[variant], nil
 }
 
-func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceURL, videoCodec string, seek, start, duration float64) ([]byte, error) {
+func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceURL, videoCodec string, variant Variant, seek, start, duration float64) ([]byte, error) {
 	limit := min(int64(maxSegmentBytes), m.config.MaxCacheBytes)
 	out := &segmentBuffer{limit: int(limit), cancel: cancel}
 	bsf := "h264_mp4toannexb"
-	if videoCodec == "hevc" {
-		// Dolby Vision RPU rides as HEVC UNSPEC62 NAL units on profile 5/8
-		// sources. Browsers without a DV path render the copied stream as
-		// black video, so drop type 62 and keep the HDR10 base layer.
-		// NOTE: keep stream copy (no re-encode): software HEVC/HDR
-		// transcoding cannot sustain realtime on the 1-vCPU VM.
+	// NOTE: keep stream copy (no re-encode): software HEVC/HDR transcoding
+	// cannot sustain realtime on the 1-vCPU VM.
+	videoTag := []string{}
+	switch {
+	case videoCodec == "hevc" && variant == DolbyVision:
+		// Keep the RPUs (HEVC UNSPEC62 NAL units). dvh1 plus the source's
+		// dvcC (written only under unofficial strictness) is what AVPlayer
+		// needs to apply them; hev1 would be decoded as plain HEVC.
+		bsf = "hevc_mp4toannexb"
+		videoTag = []string{"-tag:v", "dvh1", "-strict", "unofficial"}
+	case videoCodec == "hevc":
+		// Players without a Dolby Vision path render RPU-carrying streams as
+		// black video, so drop type 62 and keep the base layer.
 		bsf = "hevc_mp4toannexb,filter_units=remove_types=62"
 	}
 	// Input seeking preserves video packets from the preceding keyframe when
@@ -607,6 +667,9 @@ func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceU
 		"-t", seconds(duration + 2*aacFrame), "-map", "0:v:0", "-map", "0:a:0",
 		"-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn",
 		"-c:v", "copy", "-bsf:v", bsf,
+	}
+	args = append(args, videoTag...)
+	args = append(args,
 		"-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000", "-threads:a", "1",
 		// Trim negative seek preroll and fill any initial audio gap against
 		// video's origin; never reset audio independently with PTS-STARTPTS.
@@ -622,10 +685,17 @@ func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceU
 		// made globally contiguous across the playlist; VLC treats a gap as a
 		// passive seek and resets prediction. Apply the playlist origin to the
 		// emitted decode timestamps below.
-		"-movflags", "+empty_moov+default_base_moof",
+		// delay_moov: some releases carry VPS/SPS/PPS only in-band (an hvcC
+		// or avcC without parameter-set arrays), so the bitstream filter leaves
+		// no extradata and empty_moov alone writes an empty decoder config;
+		// decoders then reject every sample and show black video. Delaying the
+		// moov to the first fragment lets the muxer build it from the keyframe.
+		// A delayed moov would also gain edit lists, shifting the explicit
+		// timeline set below; keep them off so timing matches empty_moov.
+		"-movflags", "+empty_moov+delay_moov+default_base_moof", "-use_editlist", "0",
 		"-frag_duration", strconv.FormatInt(int64((duration+1)*1e6), 10),
 		"-f", "mp4", "pipe:1",
-	}
+	)
 	stderr := &stderrTail{}
 	cmd := exec.CommandContext(ctx, m.ffmpeg, args...)
 	cmd.Stdout = out
@@ -653,6 +723,9 @@ func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceU
 	}
 	if len(out.data) == 0 || !validFragmentedMP4(out.data) {
 		return nil, errors.New("playback encoder returned invalid fragmented MP4")
+	}
+	if init, _, ok := splitInit(out.data); !ok || !videoDecoderConfigured(init) {
+		return nil, errors.New("playback encoder emitted video without decoder configuration")
 	}
 	if err := shiftSegmentTimeline(out.data, start); err != nil {
 		return nil, fmt.Errorf("playback segment timeline: %w", err)

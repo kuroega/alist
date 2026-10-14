@@ -169,9 +169,44 @@ func TestSegmentBufferCancelsBeforeExceedingLimit(t *testing.T) {
 	}
 }
 
+func TestDolbyVisionVariantOnlyForProfile5(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		codec  string
+		config *DolbyVisionConfig
+		offer  bool
+	}{
+		{"profile 5", "hevc", &DolbyVisionConfig{Profile: 5, Level: 6, RPU: true, BL: true}, true},
+		// Profile 8 bases are HDR10 and play correctly without the RPU.
+		{"profile 8.1", "hevc", &DolbyVisionConfig{Profile: 8, Level: 6, RPU: true, BL: true, Compatibility: 1}, false},
+		// Dual-layer profile 7 needs its enhancement layer, which is not copied.
+		{"profile 7", "hevc", &DolbyVisionConfig{Profile: 7, Level: 6, RPU: true, BL: true, EL: true}, false},
+		{"no rpu", "hevc", &DolbyVisionConfig{Profile: 5, Level: 6, BL: true}, false},
+		{"h264", "h264", &DolbyVisionConfig{Profile: 5, Level: 6, RPU: true, BL: true}, false},
+		{"plain hevc", "hevc", nil, false},
+	} {
+		s := &Session{Index: Index{VideoCodec: tc.codec, DolbyVision: tc.config}}
+		if got := s.DolbyVision() != nil; got != tc.offer || s.offers(DolbyVision) != tc.offer || !s.offers(Compatible) {
+			t.Errorf("%s: offers Dolby Vision = %v, want %v", tc.name, got, tc.offer)
+		}
+	}
+}
+
+func TestDolbyVisionPlaylistUsesVariantResources(t *testing.T) {
+	s := &Session{Index: Index{Duration: 14.2, Boundaries: []float64{0, 6.125, 14.2}}}
+	playlist := string(s.Playlist(DolbyVision))
+	if !strings.Contains(playlist, "#EXT-X-MAP:URI=\"dv-init.mp4\"\n") ||
+		!strings.Contains(playlist, "\ndv-0.m4s\n") || !strings.Contains(playlist, "\ndv-1.m4s\n") {
+		t.Fatalf("Dolby Vision playlist must reference only dv- resources:\n%s", playlist)
+	}
+	if strings.Contains(string(s.Playlist(Compatible)), "dv-") {
+		t.Fatal("the compatible playlist must keep its original resource names")
+	}
+}
+
 func TestPlaylistMatchesIndexedTimeline(t *testing.T) {
 	s := &Session{Index: Index{Duration: 14.2, Boundaries: []float64{0, 6.125, 12.75, 14.2}}}
-	playlist := string(s.Playlist())
+	playlist := string(s.Playlist(Compatible))
 	if !strings.Contains(playlist, "#EXT-X-TARGETDURATION:7\n") || !strings.Contains(playlist, "#EXT-X-PLAYLIST-TYPE:VOD\n") || !strings.HasSuffix(playlist, "#EXT-X-ENDLIST\n") {
 		t.Fatalf("invalid VOD playlist:\n%s", playlist)
 	}
@@ -305,7 +340,7 @@ func TestEncodeSurfacesSanitizedFFmpegFailure(t *testing.T) {
 	defer m.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, err = m.encode(ctx, cancel, server.URL+"/movie.mkv?sign=capability-token", "h264", 0, 0, 6)
+	_, err = m.encode(ctx, cancel, server.URL+"/movie.mkv?sign=capability-token", "h264", Compatible, 0, 0, 6)
 	if err == nil {
 		t.Fatal("expected ffmpeg to fail on a non-media source")
 	}
@@ -349,7 +384,7 @@ func playbackSessionFixture(m *Manager, id, key string) *Session {
 		ID: id, key: key, identity: identity, sourceURL: "http://127.0.0.1/p/movie.mkv?sign=test&internal_playback=1",
 		Index: Index{Duration: 18, Boundaries: []float64{0, 6, 12, 18},
 			seekTimes: []float64{0, 9, 15}, VideoCodec: "h264", AudioCodec: "truehd"},
-		lastAccess: m.now(), ctx: ctx, cancel: cancel, segments: make(map[int]*segmentCall),
+		lastAccess: m.now(), ctx: ctx, cancel: cancel, segments: make(map[segmentKey]*segmentCall),
 	}
 	m.sessions[id] = s
 	m.keys[key] = s
@@ -363,7 +398,7 @@ func TestSessionAccessRefreshesIdleExpiry(t *testing.T) {
 	now := time.Unix(1000, 0)
 	m.now = func() time.Time { return now }
 	s := playbackSessionFixture(m, "capability", "user\x00/movie\x001:1")
-	m.cacheSegmentLocked(cacheKey{s.ID, 0}, []byte("cached segment"))
+	m.cacheSegmentLocked(cacheKey{s.ID, segmentKey{Compatible, 0}}, []byte("cached segment"))
 	if _, err := m.Get("unknown-capability"); !errors.Is(err, ErrExpired) {
 		t.Fatalf("unknown capability returned %v", err)
 	}
@@ -372,14 +407,14 @@ func TestSessionAccessRefreshesIdleExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	now = now.Add(59 * time.Second)
-	if data, err := m.Segment(context.Background(), s.ID, 0); err != nil || string(data) != "cached segment" {
+	if data, err := m.Segment(context.Background(), s.ID, Compatible, 0); err != nil || string(data) != "cached segment" {
 		t.Fatalf("active session lost its segment: %q %v", data, err)
 	}
 	now = now.Add(time.Minute)
 	if _, err := m.Get(s.ID); !errors.Is(err, ErrExpired) {
 		t.Fatalf("session survived exact idle boundary: %v", err)
 	}
-	if _, err := m.Segment(context.Background(), s.ID, 0); !errors.Is(err, ErrExpired) {
+	if _, err := m.Segment(context.Background(), s.ID, Compatible, 0); !errors.Is(err, ErrExpired) {
 		t.Fatalf("expired capability could access cached media: %v", err)
 	}
 	if !errors.Is(s.ctx.Err(), context.Canceled) {
@@ -433,27 +468,27 @@ func TestGlobalCacheEvictsLeastRecentlyUsedAllocation(t *testing.T) {
 	// A four-byte backing allocation counts even when only two bytes are used.
 	first := make([]byte, 2, 4)
 	copy(first, "aa")
-	m.cacheSegmentLocked(cacheKey{a.ID, 0}, first)
-	m.cacheSegmentLocked(cacheKey{b.ID, 0}, []byte("bbbb"))
+	m.cacheSegmentLocked(cacheKey{a.ID, segmentKey{Compatible, 0}}, first)
+	m.cacheSegmentLocked(cacheKey{b.ID, segmentKey{Compatible, 0}}, []byte("bbbb"))
 	m.slots <- struct{}{}
 	defer func() { <-m.slots }()
-	if data, err := m.Segment(context.Background(), a.ID, 0); err != nil || string(data) != "aa" {
+	if data, err := m.Segment(context.Background(), a.ID, Compatible, 0); err != nil || string(data) != "aa" {
 		t.Fatalf("cache hit was blocked by busy encoder: %q %v", data, err)
 	}
-	m.cacheSegmentLocked(cacheKey{a.ID, 1}, []byte("cccc"))
-	if _, err := m.Segment(context.Background(), b.ID, 0); !errors.Is(err, ErrBusy) {
+	m.cacheSegmentLocked(cacheKey{a.ID, segmentKey{Compatible, 1}}, []byte("cccc"))
+	if _, err := m.Segment(context.Background(), b.ID, Compatible, 0); !errors.Is(err, ErrBusy) {
 		t.Fatalf("global least-recently-used segment was not evicted: %v", err)
 	}
 	for n, want := range []string{"aa", "cccc"} {
-		if data, err := m.Segment(context.Background(), a.ID, n); err != nil || string(data) != want {
+		if data, err := m.Segment(context.Background(), a.ID, Compatible, n); err != nil || string(data) != want {
 			t.Fatalf("recent cache entry %d lost: %q %v", n, data, err)
 		}
 	}
-	if _, err := m.Segment(context.Background(), a.ID, -1); err == nil || errors.Is(err, ErrBusy) {
+	if _, err := m.Segment(context.Background(), a.ID, Compatible, -1); err == nil || errors.Is(err, ErrBusy) {
 		t.Fatalf("invalid segment was treated as encoder work: %v", err)
 	}
 	m.Close()
-	if _, err := m.Segment(context.Background(), a.ID, 0); !errors.Is(err, ErrExpired) {
+	if _, err := m.Segment(context.Background(), a.ID, Compatible, 0); !errors.Is(err, ErrExpired) {
 		t.Fatalf("closed manager exposed cached media: %v", err)
 	}
 }
@@ -526,6 +561,105 @@ func TestRevisionInvalidationDoesNotCrossUsers(t *testing.T) {
 	}
 }
 
+// Some WEB-DL releases store VPS/SPS/PPS only in-band: the Matroska hvcC has
+// no parameter-set arrays. The init segment must still carry a usable hvcC, or
+// every decoder rejects the samples and players show black video with audio.
+func TestEncodedHEVCWithInBandParameterSetsHasDecoderConfig(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Skip("ffprobe not installed")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	source := filepath.Join(t.TempDir(), "source.mkv")
+	output, err := exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", "testsrc2=size=128x72:rate=24",
+		"-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+		"-t", "16", "-c:v", "libx265", "-pix_fmt", "yuv420p10le",
+		"-x265-params", "log-level=error:keyint=48:min-keyint=48:scenecut=0:repeat-headers=1",
+		"-c:a", "ac3", source).CombinedOutput()
+	if err != nil {
+		if strings.Contains(string(output), "libx265") {
+			t.Skip("ffmpeg lacks libx265")
+		}
+		t.Fatalf("generate HEVC source: %v: %s", err, output)
+	}
+	data, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clearMatroskaHEVCParameterSets(t, data)
+	if err := os.WriteFile(source, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, source)
+	}))
+	defer server.Close()
+	m := NewManager(Config{FFmpeg: ffmpeg})
+	defer m.Close()
+	session, err := m.Open(ctx, "test\x00hevc\x001", server.URL+"/p/source?sign=test&internal_playback=1", int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Segment(ctx, session.ID, DolbyVision, 1); err == nil {
+		t.Fatal("a source without Dolby Vision must not offer the DolbyVision variant")
+	}
+	// The source has no RPUs to keep, so this checks only the packaging; the
+	// variant is enabled the way a profile 5 index would enable it.
+	m.mu.Lock()
+	m.sessions[session.ID].Index.DolbyVision = &DolbyVisionConfig{Profile: 5, Level: 6, RPU: true, BL: true}
+	m.mu.Unlock()
+	for _, tc := range []struct {
+		variant     Variant
+		sampleEntry string
+	}{{Compatible, "hev1"}, {DolbyVision, "dvh1"}} {
+		segment, err := m.Segment(ctx, session.ID, tc.variant, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		init, _, ok := splitInit(segment)
+		if !ok || !videoDecoderConfigured(init) {
+			t.Fatalf("%s init segment hvcC lacks parameter sets", tc.sampleEntry)
+		}
+		if !bytes.Contains(init, []byte(tc.sampleEntry)) {
+			t.Fatalf("variant %d init lacks a %s sample entry", tc.variant, tc.sampleEntry)
+		}
+		path := filepath.Join(t.TempDir(), "segment.mp4")
+		if err := os.WriteFile(path, segment, 0600); err != nil {
+			t.Fatal(err)
+		}
+		frames, err := exec.CommandContext(ctx, ffprobe, "-v", "error", "-count_frames", "-select_streams", "v:0",
+			"-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", path).Output()
+		if n, convErr := strconv.Atoi(strings.TrimSpace(string(frames))); err != nil || convErr != nil || n == 0 {
+			t.Fatalf("%s segment video is not decodable: %v: %s", tc.sampleEntry, err, frames)
+		}
+	}
+}
+
+// clearMatroskaHEVCParameterSets rewrites the video CodecPrivate hvcC in place
+// to declare zero parameter-set arrays, leaving them only in-band.
+func clearMatroskaHEVCParameterSets(t *testing.T, mkv []byte) {
+	t.Helper()
+	i := bytes.Index(mkv, []byte{0x63, 0xa2}) // CodecPrivate element ID
+	if i < 0 || i+2 >= len(mkv) {
+		t.Fatal("source has no CodecPrivate")
+	}
+	width := 1
+	for width <= 8 && mkv[i+2]&(0x80>>(width-1)) == 0 {
+		width++
+	}
+	hvcc := i + 2 + width
+	if width > 8 || hvcc+23 > len(mkv) || mkv[hvcc] != 1 || mkv[hvcc+22] == 0 {
+		t.Fatal("source CodecPrivate is not an hvcC with parameter sets")
+	}
+	mkv[hvcc+22] = 0 // numOfArrays; the stale array bytes are ignored
+}
+
 func TestEncodedSegmentsExcludeSeekPreroll(t *testing.T) {
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {
@@ -567,7 +701,7 @@ func TestEncodedSegmentsExcludeSeekPreroll(t *testing.T) {
 		start := session.Index.Boundaries[n]
 		end := min(session.Index.Boundaries[n+1], 32)
 		t.Run(seconds(start), func(t *testing.T) {
-			data, err := m.Segment(ctx, session.ID, n)
+			data, err := m.Segment(ctx, session.ID, Compatible, n)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -694,7 +828,7 @@ func TestEncodedSegmentsExcludeSeekPreroll(t *testing.T) {
 	if len(inits) == 3 && (!bytes.Equal(inits[1], inits[2]) || !bytes.Equal(inits[1], inits[3])) {
 		t.Fatal("segments must share one initialization segment")
 	}
-	init, err := m.Init(ctx, session.ID)
+	init, err := m.Init(ctx, session.ID, Compatible)
 	if err != nil {
 		t.Fatal(err)
 	}

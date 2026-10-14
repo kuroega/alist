@@ -282,6 +282,79 @@ func trackTimescales(moov []byte) map[uint32]uint32 {
 	return out
 }
 
+// videoDecoderConfigured reports whether every AVC/HEVC sample entry
+// (including Dolby Vision dvh1/dvhe) in an init segment carries an SPS in its
+// avcC/hvcC. Strict decoders (VideoToolbox, and FFmpeg itself) cannot parse
+// samples without it. Other codecs pass.
+func videoDecoderConfigured(init []byte) bool {
+	moov, ok := findTopBox(init, "moov", len(init))
+	if !ok {
+		return false
+	}
+	configured := true
+	var visit func(buf []byte)
+	visit = func(buf []byte) {
+		eachBox(buf, func(typ string, payload []byte) bool {
+			switch typ {
+			case "trak", "mdia", "minf", "stbl":
+				visit(payload)
+			case "stsd":
+				// FullBox version/flags(4) and entry_count(4) precede entries.
+				if len(payload) > 8 {
+					visit(payload[8:])
+				}
+			case "avc1", "avc3", "hvc1", "hev1", "dvh1", "dvhe":
+				// Child boxes follow the 78-byte VisualSampleEntry fields.
+				if len(payload) < 78 || !sampleEntryHasSPS(typ, payload[78:]) {
+					configured = false
+				}
+			}
+			return configured
+		})
+	}
+	visit(moov)
+	return configured
+}
+
+func sampleEntryHasSPS(entry string, children []byte) bool {
+	found := false
+	eachBox(children, func(typ string, p []byte) bool {
+		switch {
+		case typ == "avcC" && (entry == "avc1" || entry == "avc3"):
+			// numOfSequenceParameterSets is the low 5 bits of byte 5.
+			found = len(p) > 5 && p[5]&0x1f > 0
+			return false
+		case typ == "hvcC" && entry != "avc1" && entry != "avc3":
+			// 22 bytes of fixed fields, then numOfArrays and the arrays:
+			// type(1) numNalus(2) then numNalus × (length(2) + NAL unit).
+			if len(p) < 23 {
+				return false
+			}
+			off := 23
+			for range int(p[22]) {
+				if off+3 > len(p) {
+					return false
+				}
+				nalType, count := p[off]&0x3f, int(binary.BigEndian.Uint16(p[off+1:off+3]))
+				off += 3
+				if nalType == 33 && count > 0 {
+					found = true
+					return false
+				}
+				for range count {
+					if off+2 > len(p) {
+						return false
+					}
+					off += 2 + int(binary.BigEndian.Uint16(p[off:off+2]))
+				}
+			}
+			return false
+		}
+		return true
+	})
+	return found
+}
+
 // walkTopBoxes calls fn for every top-level box in data with its type and byte
 // range. Iteration stops early when fn returns false or a box is malformed.
 // A zero size means the box extends to the end of data, matching ISO-BMFF.

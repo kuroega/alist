@@ -98,6 +98,33 @@ func TestReadIndexTrackSelectionAndTimeline(t *testing.T) {
 	}
 }
 
+func TestReadIndexDolbyVisionConfiguration(t *testing.T) {
+	info, _, cues := testMetadata()
+	// dvcC for profile 5, level 6, RPU and base layer, compatibility 0, as in
+	// Netflix WEB-DL releases; it rides in the video track's
+	// BlockAdditionMapping, after an unrelated mapping.
+	dvcc := []byte{1, 0, 0x0a, 0x35, 0x00}
+	video := testElement(0xAE, testUint(0xD7, 7), testUint(0x83, 1), testElement(0x86, []byte("V_MPEGH/ISO/HEVC")),
+		testElement(0x41E4, testUint(0x41E7, 0x6D766343), testElement(0x41ED, []byte{9, 9, 9, 9, 9})),
+		testElement(0x41E4, testUint(0x41F0, 1), testUint(0x41E7, 0x64766343), testElement(0x41ED, dvcc)))
+	tracks := testElement(idTracks, testTrack(3, 2, "A_TRUEHD"), video)
+	data := testDocument(info, tracks, cues)
+	index, err := ReadIndex(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &DolbyVisionConfig{Profile: 5, Level: 6, RPU: true, BL: true}
+	if !reflect.DeepEqual(index.DolbyVision, want) {
+		t.Fatalf("got %#v, want %#v", index.DolbyVision, want)
+	}
+	if hdr10 := parseDolbyVision([]byte{1, 0, 0x10, 0x35, 0x10}); hdr10 == nil || hdr10.Profile != 8 || hdr10.Compatibility != 1 {
+		t.Fatalf("profile 8.1 record decoded as %#v", hdr10)
+	}
+	if parseDolbyVision([]byte{1, 0, 0x0a}) != nil {
+		t.Fatal("a truncated record must be ignored")
+	}
+}
+
 type indexFragment struct {
 	offset int64
 	data   []byte
