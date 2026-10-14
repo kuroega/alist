@@ -467,8 +467,8 @@ final class AListTVUITests: XCTestCase {
         let selected = app.buttons.matching(NSPredicate(format: "label BEGINSWITH '✓'")).allElementsBoundByIndex
         let selectedLabels = selected.filter { $0.exists }.map(\.label)
         XCTAssertTrue(
-            selectedLabels.contains(where: { $0.contains(expectedText) }),
-            "Expected '\(expectedText)' to be selected (✓), but selected items are: \(selectedLabels)",
+            selectedLabels.count == 1 && selectedLabels.contains(where: { $0.contains(expectedText) }),
+            "Expected only '\(expectedText)' to be selected (✓), but selected items are: \(selectedLabels)",
             file: file, line: line
         )
     }

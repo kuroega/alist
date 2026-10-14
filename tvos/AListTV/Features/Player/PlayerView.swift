@@ -823,7 +823,11 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
         guard let feedback = coordinator.autoPlayFeedback else { return state }
         return "\(state) · \(feedback)"
     }
-    private var isOffSelected: Bool { selectedExternalSubtitleID == nil && !embeddedSubtitleTracks.contains(where: \.isSelected) }
+    // SRT/ASS files render in the overlay, not the player, so the player alone
+    // cannot tell whether subtitles are off; the coordinator's choice must agree.
+    private var isOffSelected: Bool {
+        coordinator.subtitleSelection == .off && selectedExternalSubtitleID == nil && !embeddedSubtitleTracks.contains(where: \.isSelected)
+    }
     private func isEmbeddedSubtitleSelected(_ id: String) -> Bool { selectedExternalSubtitleID == nil && embeddedSubtitleTracks.first(where: { $0.id == id })?.isSelected == true }
     private func isExternalSubtitleSelected(_ id: String) -> Bool {
         selectedExternalSubtitleID == id || coordinator.subtitleSelection == .external(fileID: id)

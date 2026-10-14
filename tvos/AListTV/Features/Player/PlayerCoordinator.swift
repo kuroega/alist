@@ -159,6 +159,8 @@ final class PlayerCoordinator: ObservableObject {
         externalSubtitleDiscoveryState = .idle
         subtitleSelectionError = nil
         subtitleSelection = .off
+        // The previous file's cues would otherwise keep drawing, out of sync.
+        subtitleOverlay.clear()
         state = .loading
 
         do {
@@ -248,6 +250,7 @@ final class PlayerCoordinator: ObservableObject {
         externalSubtitleDiscoveryState = .idle
         subtitleSelectionError = nil
         subtitleSelection = .off
+        subtitleOverlay.clear()
         resetSiblingMedia()
     }
 
@@ -618,6 +621,7 @@ final class PlayerCoordinator: ObservableObject {
             if case let .external(fileID) = selectionToRestore {
                 await selectSubtitle(.external(fileID: fileID))
                 if subtitleSelectionError != nil {
+                    subtitleOverlay.clear()
                     subtitleSelection = .off
                 }
             }

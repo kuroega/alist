@@ -414,6 +414,27 @@ final class PlayerCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.externalSubtitles.map(\.title), ["Movie.en.srt", "Movie.idx", "Other.ass"])
     }
 
+    func testNextFileStartsWithoutPreviousSubtitleCues() async throws {
+        let api = PlayerFakeAPI(
+            details: [
+                detail(url: "https://media.example/Movie.mp4", path: "/Movie.mp4"),
+                detail(url: "https://media.example/Movie.en.srt", path: "/Movie.en.srt"),
+                detail(url: "https://media.example/E02.mp4", path: "/E02.mp4")
+            ],
+            listPages: [[AListObject(virtualPath: "/Movie.en.srt", name: "Movie.en.srt", isDirectory: false)], []]
+        )
+        let coordinator = makeCoordinator(api: api, player: PlayerFakeController())
+        await coordinator.play(object: object("/Movie.mp4"))
+        try await waitUntil { coordinator.externalSubtitleDiscoveryState == .loaded }
+        await coordinator.selectSubtitle(.external(fileID: "/Movie.en.srt"))
+        XCTAssertFalse(coordinator.subtitleOverlay.cues.isEmpty)
+
+        await coordinator.play(object: object("/E02.mp4"))
+
+        XCTAssertEqual(coordinator.subtitleSelection, .off)
+        XCTAssertTrue(coordinator.subtitleOverlay.cues.isEmpty, "the previous file's subtitles must not draw over the next")
+    }
+
     func testExternalSubtitleSelectionResolvesSecureURL() async throws {
         let api = PlayerFakeAPI(
             details: [
