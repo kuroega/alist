@@ -252,3 +252,48 @@ VM 当前运行的二进制仍为上述 sha256，FFmpeg 为 8.1.2。在 VM 上�
 VM FFmpeg 8.1.2 上另以 616,644,992 字节、2667.198 秒的 H.264/AC3 缓存源做同源旧/新对照（与用户指定的 E21 在日志访问时间一致，但没有依文件名验证缓存身份）：相邻 **60 片 / 544.411 秒**，旧版 HLS 音频解码长度 **545.1094 秒**，音频内容在 4/175/345/510 秒相对原件分别落后约 0.021/0.251/0.462/0.677 秒；新版音频解码长度 **544.4054 秒**，同一位置仅落后约 0.021/0.016/0.014/0.016 秒，没有累积漂移。另一份 596,695,754 字节的 60 片样本新版在 4–510 秒偏差也保持约 0.011–0.032 秒。新版各检测片的 AAC 包全是 1024/48000 秒完整帧；60 片完整视频解码无报错。`go test ./internal/playback/...` 在本地和 VM（ffmpeg 8.1.2）通过，新增相邻/末片的音频帧数、首帧时间、全帧 duration 及 tfdt v0/v1 回归测试。
 
 部署：VM 原二进制 sha256 `9f98c0394838f73ea70a344e65555a9167133c0ad519f5a1e72ba2fa1b9124b1` 备份于 `/opt/alist/alist.pre-aac-grid`；当前运行二进制 sha256 `debc65871dd13726cfb023a16ecc1ad963b13332d15bed4a458717a6e1283015`。服务重启后 HTTP 首页 200、`rc-service alist status` 为 started；VM `/opt/alist` Go 源同步并通过播放包测试，旧源码备份于 `/opt/alist.source-pre-aac-grid.tgz`。原文件缓存未动，临时诊断媒体已删除。**浏览器/Simulator 仍需用户重新打开播放并主观确认**；重启会使旧 HLS session URL 失效。
+
+## 已解决：有声音无画面（黑屏）与杜比视界 Profile 5 偏色（2026-10-14）
+
+样本：`Monster：The Lizzie Borden Story S01E01 2160p Netflix WEB-DL DV HEVC DDP5.1 Atmos.mkv`
+（DV Profile 5，level 6，`bl_signal_compatibility_id=0`）。
+
+### 黑屏根因：init 分片的 `hvcC` 为空
+
+- VLC 统计：`demuxBitrate` 正常，`decodedVideo=0`、`displayedPictures=0`，音频正常解码。
+- `init.mp4` 中 `hev1` 下的 `hvcC` 仅 8 字节（只有盒头）。连 ffprobe 都无法解码
+  `init.mp4 + 0.m4s`。
+- 该片源的 Matroska `hvcC` 为 23 字节、`numOfArrays=0`，VPS/SPS/PPS 只在码流内。
+  `hevc_mp4toannexb` 之后没有 extradata，而 `+empty_moov` 在第一个包之前就写出
+  moov，因此解码配置为空。
+- 修复：`+delay_moov`，让 muxer 用首个关键帧的参数集生成 `hvcC`；同时加
+  `-use_editlist 0`，否则延迟写出的 moov 会带 edit list，使 AAC 起点后移约 62 ms。
+  另外在 `encode()` 中校验 init 的 avcC/hvcC 含 SPS，异常时直接报错而不是输出黑屏流。
+- 验证：同一生产分片配旧 init 解码 0 帧，配新 init 解码 374 帧。回归测试
+  `TestEncodedHEVCWithInBandParameterSetsHasDecoderConfig` 在去掉修复后失败。
+- 注意：不同 GOP 的 PPS 不同（9/8 字节），码流内参数集必须保持权威，所以兼容流继续用 `hev1`。
+
+### 偏色根因：剥离 RPU 后的 Profile 5 基础层
+
+Profile 5 基础层是 IPTPQc2，没有 HDR10/SDR 回退。剥离 RPU（type 62）后，任何解码器
+都显示绿/洋红偏色；Profile 8 基础层是 HDR10，剥离后正常。
+
+修复：
+
+- 后端在索引阶段从 `BlockAdditionMapping`（`dvcC`/`dvvC`）读取 DV 配置。仅对
+  Profile 5 在同一会话上提供 `dv-index.m3u8` / `dv-init.mp4` / `dv-N.m4s`：保留 RPU、
+  `-tag:v dvh1 -strict unofficial`（写出 `dvcC`）。`fs/get` 返回可选字段 `dolby_vision`。
+- tvOS：`NativePlayerControllerAdapter`（AVPlayer）在设备支持 HEVC 硬解时播放 DV 流，
+  其余仍走 VLC。外挂 SRT/ASS 字幕由应用自身的叠加层渲染，两种播放器一致。
+  显示模式通过 `AVDisplayManager.preferredDisplayCriteria` 匹配（需开启“匹配内容”）。
+- 只提供媒体播放列表：多变体播放列表（即使只含 `BANDWIDTH`）会被 AVFoundation 拒绝
+  （-12927 / -1002），而媒体播放列表可正常播放，DV 信息来自 init 中的 `dvh1`+`dvcC`。
+
+验证：
+
+- macOS AVFoundation 经真实后端代码（VM、FFmpeg 8.1.2）连续播放 30 s：721 帧，
+  首帧 3840×2160 10-bit，传输函数 `SMPTE_ST_2084_PQ`，说明 RPU 已被应用；跳转到
+  1500 s 精确起播（冷缓存 8.4 s）。
+- Apple TV 4K（第 2 代）真机：从 60 s 播放到 70 s，duration 3267.6 s，缓冲领先 88 s，
+  丢帧 0，吞吐约 72 Mbit/s。
+- 模拟器没有 HEVC 硬解（`isSupported=false`），因此模拟器中 DV 文件仍走 VLC。

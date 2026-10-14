@@ -22,6 +22,7 @@ final class AppContainer: ObservableObject {
     let appStorage: UserDefaults
 
     private let controllerFactory: @MainActor () -> any PlayerControlling
+    private let dolbyVisionControllerFactory: @MainActor () -> (any PlayerControlling)?
     private let subtitleDataLoader: @Sendable (URL) async throws -> Data
     private let subtitleAppearanceStore: SubtitleAppearanceStore
     private let playbackProgressStore: PlaybackProgressStore
@@ -37,6 +38,10 @@ final class AppContainer: ObservableObject {
         let subtitleAppearanceStore: SubtitleAppearanceStore
         let clientFactory: AListClientFactory
         let controllerFactory: @MainActor () -> any PlayerControlling
+        // Real servers only: fixtures never offer a Dolby Vision stream.
+        var dolbyVisionControllerFactory: @MainActor () -> (any PlayerControlling)? = {
+            NativePlayerControllerAdapter.isSupported ? NativePlayerControllerAdapter() : nil
+        }
         let subtitleDataLoader: @Sendable (URL) async throws -> Data
         let playbackProgressStore: PlaybackProgressStore
         let playbackSettingsStore: PlaybackSettingsStore
@@ -60,6 +65,7 @@ final class AppContainer: ObservableObject {
             appStorage = defaults
             clientFactory = { _, _ in fixtureAPI }
             controllerFactory = { FixturePlayerController(autoCompletesPlayback: arguments.contains("ui-testing-autoplay")) }
+            dolbyVisionControllerFactory = { nil }
             subtitleDataLoader = FixtureSubtitleDataLoader.load
             // UI tests stay offline and never reuse a real library index.
             tmdbAPIKey = nil
@@ -104,6 +110,7 @@ final class AppContainer: ObservableObject {
 #endif
 
         self.controllerFactory = controllerFactory
+        self.dolbyVisionControllerFactory = dolbyVisionControllerFactory
         self.subtitleDataLoader = subtitleDataLoader
         self.subtitleAppearanceStore = subtitleAppearanceStore
         self.playbackProgressStore = playbackProgressStore
@@ -165,6 +172,7 @@ final class AppContainer: ObservableObject {
         let player = PlayerCoordinator(
             api: api,
             controller: controllerFactory(),
+            dolbyVisionController: dolbyVisionControllerFactory(),
             progressStore: playbackProgressStore,
             subtitleAppearanceStore: subtitleAppearanceStore,
             playbackSettingsStore: playbackSettingsStore,

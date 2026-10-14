@@ -9,20 +9,26 @@ struct PlayerView: View {
     var body: some View {
         Group {
 #if DEBUG
-            if let adapter = coordinator.controller as? VLCPlayerControllerAdapter {
-                VLCPlayerContainerView(adapter: adapter, coordinator: coordinator, dismiss: dismiss, exitRequestID: exitRequestID)
-            } else if let fixture = coordinator.controller as? FixturePlayerController {
+            if let fixture = coordinator.controller as? FixturePlayerController {
                 FixturePlayerContainerView(fixture: fixture, coordinator: coordinator, dismiss: dismiss, exitRequestID: exitRequestID)
+            } else {
+                playerContainer
             }
 #else
-            if let adapter = coordinator.controller as? VLCPlayerControllerAdapter {
-                VLCPlayerContainerView(adapter: adapter, coordinator: coordinator, dismiss: dismiss, exitRequestID: exitRequestID)
-            }
+            playerContainer
 #endif
         }
         .interactiveDismissDisabled()
         .onExitCommand { exitRequestID += 1 }
         .onDisappear { coordinator.playerDidDisappear() }
+    }
+
+    @ViewBuilder private var playerContainer: some View {
+        if let adapter = coordinator.controller as? VLCPlayerControllerAdapter {
+            VLCPlayerContainerView(adapter: adapter, coordinator: coordinator, dismiss: dismiss, exitRequestID: exitRequestID)
+        } else if let adapter = coordinator.controller as? NativePlayerControllerAdapter {
+            NativePlayerContainerView(adapter: adapter, coordinator: coordinator, dismiss: dismiss, exitRequestID: exitRequestID)
+        }
     }
 }
 
@@ -64,6 +70,48 @@ struct VLCPlayerContainerView: View {
             close: { coordinator.playerDidDisappear(); dismiss() }
         ) {
             VLCPlayerRepresentable(adapter: adapter)
+        }
+    }
+}
+
+struct NativePlayerRepresentable: UIViewRepresentable {
+    let adapter: NativePlayerControllerAdapter
+    func makeUIView(context: Context) -> UIView { adapter.videoView }
+    func updateUIView(_ uiView: UIView, context: Context) {}
+}
+
+struct NativePlayerContainerView: View {
+    @ObservedObject var adapter: NativePlayerControllerAdapter
+    @ObservedObject var coordinator: PlayerCoordinator
+    let dismiss: DismissAction
+    let exitRequestID: Int
+
+    var body: some View {
+        ImmersivePlaybackStage(
+            coordinator: coordinator,
+            exitRequestID: exitRequestID,
+            currentTime: adapter.currentTime,
+            duration: adapter.duration,
+            isPlaying: adapter.isPlaying,
+            isSeekable: adapter.isSeekable,
+            isBuffering: adapter.isBuffering,
+            bufferedTime: adapter.bufferedTime,
+            audioTracks: adapter.audioTracks,
+            embeddedSubtitleTracks: adapter.embeddedSubtitleTracks,
+            selectedExternalSubtitleID: adapter.selectedExternalSubtitleID,
+            subtitleAppearance: coordinator.subtitleAppearance,
+            subtitleOverlay: coordinator.subtitleOverlay,
+            updateSubtitleAppearance: coordinator.updateSubtitleAppearance,
+            diagnostics: adapter.diagnostics,
+            play: adapter.play,
+            pause: adapter.pause,
+            seek: { seconds in Task { await adapter.seek(to: seconds) } },
+            seekAndPlay: { seconds in Task { await adapter.seek(to: seconds); adapter.play() } },
+            selectAudio: adapter.selectAudioTrack,
+            setDiagnosticsEnabled: adapter.setDiagnosticsEnabled,
+            close: { coordinator.playerDidDisappear(); dismiss() }
+        ) {
+            NativePlayerRepresentable(adapter: adapter)
         }
     }
 }

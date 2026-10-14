@@ -110,6 +110,8 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
 
     func pause() { mediaPlayer.pause() }
 
+    func stop() { mediaPlayer.stop() }
+
     func seek(to seconds: TimeInterval) async {
         let target = PlaybackPresentation.clampedSeekTarget(seconds, duration: duration)
         guard mediaPlayer.isSeekable else {

@@ -76,6 +76,23 @@ final class AListClientContractTests: XCTestCase {
         XCTAssertEqual(page.content[0].modified, "2026-08-19T10:11:12.123456789Z")
     }
 
+    func testDecodesOptionalDolbyVisionStream() async throws {
+        let dolbyVision = #"{"code":200,"message":"success","data":{"name":"dv.mkv","size":1,"is_dir":false,"raw_url":"http://alist.example/playback/s/index.m3u8","dolby_vision":{"url":"http://alist.example/playback/s/dv-index.m3u8","profile":5,"level":6}}}"#
+        let plain = #"{"code":200,"message":"success","data":{"name":"a.mp4","size":1,"is_dir":false,"raw_url":"http://alist.example/d/a.mp4"}}"#
+        for body in [dolbyVision, plain] {
+            ContractURLProtocol.handler = { request in
+                XCTAssertEqual(request.url?.path, "/api/fs/get")
+                return Self.response(for: request, status: 200, body: body)
+            }
+            let detail = try await makeClient().get(path: "/x")
+            if body == dolbyVision {
+                XCTAssertEqual(detail.dolbyVision, DolbyVisionStream(url: "http://alist.example/playback/s/dv-index.m3u8", profile: 5, level: 6))
+            } else {
+                XCTAssertNil(detail.dolbyVision)
+            }
+        }
+    }
+
     func testListSendsRefreshFlag() async throws {
         ContractURLProtocol.handler = { request in
             XCTAssertEqual(request.httpMethod, "POST")

@@ -123,12 +123,21 @@ struct AListObject: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+struct DolbyVisionStream: Decodable, Equatable, Sendable {
+    let url: String
+    let profile: Int
+    let level: Int
+}
+
 struct GetRequest: Encodable, Equatable {
     let path: String
 }
 
 struct FileDetail: Decodable, Equatable, Sendable {
     let rawURL: String
+    /// A stream that keeps Dolby Vision metadata which `rawURL` drops; set
+    /// only when the video needs it for correct color (profile 5).
+    var dolbyVision: DolbyVisionStream? = nil
     let virtualPath: String?
     let name: String
     let size: Int64
@@ -141,6 +150,7 @@ struct FileDetail: Decodable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case name, size, modified, created, type
         case rawURL = "raw_url"
+        case dolbyVision = "dolby_vision"
         case virtualPath = "virtual_path"
         case isDirectory = "is_dir"
         case thumbnail = "thumb"

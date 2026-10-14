@@ -156,6 +156,9 @@ protocol PlayerControlling: AnyObject {
     func replaceCurrentItem(url: URL, preservingSelections: Bool)
     func play()
     func pause()
+    /// Releases the current item (decoder and connections) when the
+    /// coordinator switches to another player.
+    func stop()
     func seek(to seconds: TimeInterval) async
     func selectAudioTrack(id: String)
     func selectEmbeddedSubtitle(id: String?)

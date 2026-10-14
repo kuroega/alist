@@ -17,6 +17,51 @@ final class PlayerCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.state, .playing)
     }
 
+    func testDolbyVisionStreamPlaysOnNativePlayerAndLaterFilesSwitchBack() async {
+        let api = PlayerFakeAPI(details: [dolbyVisionDetail(), detail(url: "https://media.example/plain.mp4", path: "/plain.mp4")])
+        let vlc = PlayerFakeController()
+        let native = PlayerFakeController()
+        let coordinator = makeCoordinator(api: api, player: vlc, dolbyVisionPlayer: native)
+
+        await coordinator.play(object: object("/dv.mkv"))
+        XCTAssertTrue(coordinator.controller === native)
+        XCTAssertEqual(native.replacedURLs.map(\.absoluteString), ["https://alist.example/playback/s/dv-index.m3u8"])
+        XCTAssertEqual(native.playCount, 1)
+        XCTAssertTrue(vlc.replacedURLs.isEmpty)
+
+        await coordinator.play(object: object("/plain.mp4"))
+        XCTAssertTrue(coordinator.controller === vlc)
+        XCTAssertEqual(native.stopCount, 1, "the native player must release its stream")
+        XCTAssertEqual(vlc.replacedURLs.map(\.absoluteString), ["https://media.example/plain.mp4"])
+    }
+
+    func testDolbyVisionStreamUsesCompatibleStreamWithoutNativePlayer() async {
+        let api = PlayerFakeAPI(details: [dolbyVisionDetail()])
+        let vlc = PlayerFakeController()
+        let coordinator = makeCoordinator(api: api, player: vlc)
+
+        await coordinator.play(object: object("/dv.mkv"))
+
+        XCTAssertTrue(coordinator.controller === vlc)
+        XCTAssertEqual(vlc.replacedURLs.map(\.absoluteString), ["https://alist.example/playback/s/index.m3u8"])
+    }
+
+    func testIgnoresEventsFromInactivePlayer() async throws {
+        let api = PlayerFakeAPI(details: [dolbyVisionDetail(), detail(url: "https://media.example/plain.mp4", path: "/plain.mp4")])
+        let vlc = PlayerFakeController()
+        let native = PlayerFakeController()
+        let coordinator = makeCoordinator(api: api, player: vlc, dolbyVisionPlayer: native)
+        await coordinator.play(object: object("/dv.mkv"))
+        await coordinator.play(object: object("/plain.mp4"))
+
+        native.emit(.failed(message: "stale failure"))
+        try await Task.sleep(for: .milliseconds(100))
+
+        XCTAssertEqual(coordinator.state, .playing)
+        let paths = await api.getPaths
+        XCTAssertEqual(paths, ["/dv.mkv", "/plain.mp4"], "a stale failure must not trigger a refresh")
+    }
+
     func testReportsStartedPlaybackOnlyAfterURLResolves() async {
         let api = PlayerFakeAPI(details: [
             detail(url: "http://media.example/video.mp4", path: "/insecure.mp4"),
@@ -600,6 +645,7 @@ final class PlayerCoordinatorTests: XCTestCase {
     private func makeCoordinator(
         api: PlayerFakeAPI,
         player: PlayerFakeController,
+        dolbyVisionPlayer: PlayerFakeController? = nil,
         store: PlaybackProgressStore? = nil,
         onPlaybackStarted: @escaping @MainActor (AListObject) -> Void = { _ in },
         subtitleDataLoader: @escaping @Sendable (URL) async throws -> Data = { url in try nativeSubtitleData(for: url) },
@@ -620,6 +666,7 @@ final class PlayerCoordinatorTests: XCTestCase {
         return PlayerCoordinator(
             api: api,
             controller: player,
+            dolbyVisionController: dolbyVisionPlayer,
             progressStore: progressStore,
             subtitleAppearanceStore: SubtitleAppearanceStore(defaults: progressStoreDefaults()),
             playbackSettingsStore: PlaybackSettingsStore(defaults: settingsDefaults),
@@ -644,6 +691,12 @@ final class PlayerCoordinatorTests: XCTestCase {
 
     private func detail(url: String, path: String) -> FileDetail {
         FileDetail(rawURL: url, virtualPath: path, name: "video.mp4", size: 100, isDirectory: false, modified: nil, created: nil, type: AListFileType.video.rawValue, thumbnail: nil)
+    }
+
+    private func dolbyVisionDetail() -> FileDetail {
+        var detail = detail(url: "https://alist.example/playback/s/index.m3u8", path: "/dv.mkv")
+        detail.dolbyVision = DolbyVisionStream(url: "https://alist.example/playback/s/dv-index.m3u8", profile: 5, level: 6)
+        return detail
     }
 
     private func waitUntil(condition: @escaping @MainActor () -> Bool) async throws {
@@ -773,6 +826,7 @@ private final class PlayerFakeController: PlayerControlling {
     private(set) var preserveSelectionsValues: [Bool] = []
     private(set) var seekValues: [TimeInterval] = []
     private(set) var playCount = 0
+    private(set) var stopCount = 0
     var shouldFailExternalSubtitleAdd = false
     private(set) var addedExternalSubtitleIDs: [String] = []
     private var loadedExternalSubtitleIDs = Set<String>()
@@ -793,6 +847,7 @@ private final class PlayerFakeController: PlayerControlling {
     }
     func play() { playCount += 1; isPlaying = true }
     func pause() { isPlaying = false; continuation.yield(.paused) }
+    func stop() { stopCount += 1; isPlaying = false }
     func seek(to seconds: TimeInterval) async {
         seekValues.append(seconds)
         currentTime = seconds

@@ -43,7 +43,9 @@ final class PlayerCoordinator: ObservableObject {
     @Published private(set) var siblingMediaState: SiblingMediaState = .idle
     let subtitleOverlay = SubtitleOverlayModel()
 
-    let controller: any PlayerControlling
+    /// The player for the current file: `standardController` (VLC), or the
+    /// Dolby Vision-capable native player when the file needs it.
+    @Published private(set) var controller: any PlayerControlling
     var nowPlayingTitle: String { currentObject?.name ?? "Now Playing" }
     var nowPlayingPath: String? { currentObject?.virtualPath }
     var isTerminalFailure: Bool {
@@ -51,6 +53,8 @@ final class PlayerCoordinator: ObservableObject {
         return false
     }
     private let api: any AListAPI
+    private let standardController: any PlayerControlling
+    private let dolbyVisionController: (any PlayerControlling)?
     private let progressStore: PlaybackProgressStore
     private let subtitleAppearanceStore: SubtitleAppearanceStore
     private let playbackSettingsStore: PlaybackSettingsStore
@@ -64,7 +68,7 @@ final class PlayerCoordinator: ObservableObject {
     private var sessionID = UUID()
     private var refreshCount = 0
     private var subtitleAppearanceReloadID = UUID()
-    private var eventTask: Task<Void, Never>?
+    private var eventTasks: [ObjectIdentifier: Task<Void, Never>] = [:]
     private var progressTask: Task<Void, Never>?
     private var resumeTask: Task<Void, Never>?
     private var autoPlayTask: Task<Void, Never>?
@@ -78,6 +82,7 @@ final class PlayerCoordinator: ObservableObject {
     init(
         api: any AListAPI,
         controller: any PlayerControlling,
+        dolbyVisionController: (any PlayerControlling)? = nil,
         progressStore: PlaybackProgressStore,
         subtitleAppearanceStore: SubtitleAppearanceStore = SubtitleAppearanceStore(),
         playbackSettingsStore: PlaybackSettingsStore = PlaybackSettingsStore(),
@@ -90,6 +95,8 @@ final class PlayerCoordinator: ObservableObject {
     ) {
         self.api = api
         self.controller = controller
+        standardController = controller
+        self.dolbyVisionController = dolbyVisionController
         self.progressStore = progressStore
         self.subtitleAppearanceStore = subtitleAppearanceStore
         self.playbackSettingsStore = playbackSettingsStore
@@ -101,7 +108,8 @@ final class PlayerCoordinator: ObservableObject {
         self.onPlaybackStarted = onPlaybackStarted
         self.subtitleDataLoader = subtitleDataLoader
         self.resumeCountdownInterval = resumeCountdownInterval
-        controller.setSubtitleAppearance(subtitleAppearance)
+        standardController.setSubtitleAppearance(subtitleAppearance)
+        dolbyVisionController?.setSubtitleAppearance(subtitleAppearance)
     }
 
     static func loadSubtitleData(from url: URL) async throws -> Data {
@@ -110,7 +118,7 @@ final class PlayerCoordinator: ObservableObject {
     }
 
     deinit {
-        eventTask?.cancel()
+        eventTasks.values.forEach { $0.cancel() }
         progressTask?.cancel()
         resumeTask?.cancel()
         autoPlayTask?.cancel()
@@ -156,8 +164,7 @@ final class PlayerCoordinator: ObservableObject {
         do {
             let detail = try await api.get(path: path)
             guard sessionID == activeSession else { return }
-            let url = try PlayableURLValidator.validate(detail.rawURL)
-            controller.replaceCurrentItem(url: url, preservingSelections: false)
+            try loadMedia(detail, preservingSelections: false)
             guard sessionID == activeSession else { return }
             isPresented = true
             state = .playing
@@ -345,7 +352,8 @@ final class PlayerCoordinator: ObservableObject {
         guard subtitleAppearance != appearance else { return }
         subtitleAppearance = appearance
         subtitleAppearanceStore.save(appearance)
-        controller.setSubtitleAppearance(appearance)
+        standardController.setSubtitleAppearance(appearance)
+        dolbyVisionController?.setSubtitleAppearance(appearance)
         guard currentObject != nil, state == .playing else { return }
         subtitleAppearanceReloadID = UUID()
         let reloadID = subtitleAppearanceReloadID
@@ -368,8 +376,7 @@ final class PlayerCoordinator: ObservableObject {
         do {
             let detail = try await api.get(path: path)
             guard sessionID == activeSession, subtitleAppearanceReloadID == reloadID else { return }
-            let url = try PlayableURLValidator.validate(detail.rawURL)
-            controller.replaceCurrentItem(url: url, preservingSelections: true)
+            try loadMedia(detail, preservingSelections: true)
             if position > 0 { await controller.seek(to: position) }
             guard sessionID == activeSession, subtitleAppearanceReloadID == reloadID else { return }
             if wasPlaying { controller.play() }
@@ -459,13 +466,36 @@ final class PlayerCoordinator: ObservableObject {
         return try? AListPath.join(parent: parent, name: object.name)
     }
 
+    /// Picks the player for a file. The Dolby Vision stream goes to the native
+    /// player when the server offers one (the compatible stream would render
+    /// with wrong colors) and this device has that player; VLC otherwise.
+    private func loadMedia(_ detail: FileDetail, preservingSelections: Bool) throws {
+        let next: any PlayerControlling
+        let url: URL
+        if let stream = detail.dolbyVision, let native = dolbyVisionController {
+            next = native
+            url = try PlayableURLValidator.validate(stream.url)
+        } else {
+            next = standardController
+            url = try PlayableURLValidator.validate(detail.rawURL)
+        }
+        if next !== controller {
+            controller.stop()
+            controller = next
+        }
+        controller.replaceCurrentItem(url: url, preservingSelections: preservingSelections)
+    }
+
     private func startMonitoring(session: UUID) {
-        if eventTask == nil {
-            let events = controller.events
-            eventTask = Task { [weak self] in
+        for source in [standardController, dolbyVisionController].compactMap({ $0 }) {
+            let id = ObjectIdentifier(source)
+            guard eventTasks[id] == nil else { continue }
+            let events = source.events
+            eventTasks[id] = Task { [weak self] in
                 for await event in events {
                     guard !Task.isCancelled, let self else { return }
-                    guard self.currentObject != nil else { continue }
+                    // A player that was just stopped may still report.
+                    guard self.currentObject != nil, ObjectIdentifier(self.controller) == id else { continue }
                     let session = self.sessionID
                     switch event {
                     case let .failed(message): await self.handleFailure(message, session: session)
@@ -580,8 +610,7 @@ final class PlayerCoordinator: ObservableObject {
         do {
             let detail = try await api.get(path: path)
             guard sessionID == session else { return }
-            let url = try PlayableURLValidator.validate(detail.rawURL)
-            controller.replaceCurrentItem(url: url, preservingSelections: true)
+            try loadMedia(detail, preservingSelections: true)
             if position > 0 { await controller.seek(to: position) }
             guard sessionID == session else { return }
             controller.play()

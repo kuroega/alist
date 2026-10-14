@@ -131,6 +131,7 @@ final class FixturePlayerController: ObservableObject, PlayerControlling {
         }
     }
     func pause() { isPlaying = false; continuation.yield(.paused) }
+    func stop() { isPlaying = false }
     func seek(to seconds: TimeInterval) async { currentTime = duration > 0 ? min(max(0, seconds), duration) : max(0, seconds) }
     func selectAudioTrack(id: String) { audioTracks = audioTracks.map { PlaybackTrackOption(id: $0.id, title: $0.title, languageCode: $0.languageCode, codec: $0.codec, isSelected: $0.id == id) } }
     func selectEmbeddedSubtitle(id: String?) { selectedExternalSubtitleID = nil; embeddedSubtitleTracks = embeddedSubtitleTracks.map { PlaybackTrackOption(id: $0.id, title: $0.title, languageCode: $0.languageCode, codec: $0.codec, isSelected: $0.id == id) } }
