@@ -308,6 +308,7 @@ final class GalleryViewModel: ObservableObject {
             if result.foldersReused == 0 { scanState.fullCompletedAt = now }
             scanState.roots = LibraryScanner.minimalRoots(roots)
             lastScan = now
+            forgetRemovedTitles()
         }
         if result.foldersFailed > 0 {
             libraryIssue = result.foldersListed == 0
@@ -322,6 +323,15 @@ final class GalleryViewModel: ObservableObject {
         }
         // Titles that failed to reach TMDB, or misses due a retry, go again.
         enqueueMatches(for: files.values)
+    }
+
+    /// Mirrors the store's clean-up at the end of a complete scan: titles no
+    /// indexed video has any more lose their match and are not looked up.
+    private func forgetRemovedTitles() {
+        let keys = Set(files.values.map { GalleryMatchKey.key(for: $0.parsed) })
+        matches = matches.filter { keys.contains($0.key) }
+        matchQueue = matchQueue.filter { keys.contains($0.key) }
+        updateMatchProgress()
     }
 
     var prefersEnglishMetadata: Bool { store.prefersEnglishMetadata }

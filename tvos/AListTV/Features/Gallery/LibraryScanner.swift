@@ -53,6 +53,9 @@ struct LibraryScanResult: Equatable, Sendable {
     var foldersReused: Int
     /// Folders that could not be read; what was known about them is kept.
     var foldersFailed: Int
+    /// Folders the server says no longer exist (a deleted library folder,
+    /// or one removed mid-scan); everything known below them is removed.
+    var foldersMissing = 0
 }
 
 /// Walks the server breadth-first from the library folders and keeps the
@@ -62,7 +65,8 @@ struct LibraryScanResult: Equatable, Sendable {
 /// interrupted scan keeps its progress. In `.quick` mode a folder without
 /// subfolders is not listed again while the modified time its parent
 /// reports is unchanged; its stored videos are reused. `.full` lists every
-/// folder. Either way only differences are reported, and a folder that
+/// folder. Either way only differences are reported: videos and folders that
+/// disappeared are removed along with their stored rows, while a folder that
 /// fails to list keeps what was known about it instead of vanishing.
 struct LibraryScanner: Sendable {
     enum Mode: Sendable {
@@ -77,6 +81,17 @@ struct LibraryScanner: Sendable {
     var concurrency = 4
     /// Changes gathered before they are handed over (also flushed every second).
     var changeBatch = 250
+
+    /// What listing one folder produced.
+    private enum Listing {
+        case items([AListObject])
+        /// The server confirmed the folder is gone.
+        case missing
+        /// It could not be read this time.
+        case failed
+
+        var isMissing: Bool { if case .missing = self { return true }; return false }
+    }
 
     private struct Pending {
         let path: String
@@ -138,7 +153,7 @@ struct LibraryScanner: Sendable {
             }
         }
 
-        try await withThrowingTaskGroup(of: (Pending, [AListObject]?).self) { group in
+        try await withThrowingTaskGroup(of: (Pending, Listing).self) { group in
             var running = 0
             while true {
                 while running < concurrency, head < queue.count, visited.count < maxFolders {
@@ -155,12 +170,22 @@ struct LibraryScanner: Sendable {
                     group.addTask { (next, try await listAll(next.path)) }
                 }
                 guard running > 0, let reply = try await group.next() else { break }
-                let (folder, items) = reply
+                let (folder, listing) = reply
                 running -= 1
                 try Task.checkCancellation()
 
-                if let items {
-                    result.foldersListed += 1
+                switch listing {
+                case .items, .missing:
+                    let items: [AListObject]
+                    if case let .items(listed) = listing {
+                        result.foldersListed += 1
+                        items = listed
+                    } else {
+                        // Gone from the server: it lists as empty, so its videos
+                        // and subfolders are dropped like any other deletion.
+                        result.foldersMissing += 1
+                        items = []
+                    }
                     var subfolders: [Pending] = []
                     var subfolderPaths = Set<String>()
                     var videos: [String: LibraryFile] = [:]
@@ -177,7 +202,8 @@ struct LibraryScanner: Sendable {
                         }
                     }
 
-                    let record = GalleryFolderRecord(path: folder.path, parent: folder.parent, modified: folder.reported, listedAt: Date())
+                    // A missing folder is never reused, so it is checked again if it returns.
+                    let record = GalleryFolderRecord(path: folder.path, parent: folder.parent, modified: folder.reported, listedAt: listing.isMissing ? nil : Date())
                     folders[folder.path] = record
                     children[folder.path] = subfolders.map(\.path)
                     for subfolder in subfolders {
@@ -195,14 +221,14 @@ struct LibraryScanner: Sendable {
                         pending.remove(old.path)
                     }
                     queue += subfolders
-                } else {
+                case .failed:
                     result.foldersFailed += 1
                     keepSubtree(of: folder.path)
                 }
 
                 await handOver(force: false)
                 await progress(LibraryScanProgress(
-                    foldersScanned: result.foldersListed + result.foldersReused + result.foldersFailed,
+                    foldersScanned: result.foldersListed + result.foldersReused + result.foldersFailed + result.foldersMissing,
                     videosFound: live.count,
                     currentFolder: folder.path
                 ))
@@ -211,7 +237,7 @@ struct LibraryScanner: Sendable {
         try Task.checkCancellation()
 
         // Only a pass that reached the server and every folder may delete.
-        result.isComplete = head == queue.count && result.foldersListed > 0
+        result.isComplete = head == queue.count && result.foldersListed + result.foldersMissing > 0
         if result.isComplete {
             for path in known.keys where !live.contains(path) { pending.remove(path) }
         }
@@ -238,10 +264,10 @@ struct LibraryScanner: Sendable {
         return year >= 1980
     }
 
-    /// Lists every page of a folder, or returns nil when it cannot be read so
-    /// one locked share never sinks the whole scan; an expired session and
-    /// cancellation still surface.
-    private func listAll(_ path: String) async throws -> [AListObject]? {
+    /// Lists every page of a folder. One that cannot be read is reported as
+    /// failed so one locked share never sinks the whole scan; an expired
+    /// session and cancellation still surface.
+    private func listAll(_ path: String) async throws -> Listing {
         var items: [AListObject] = []
         var page = 1
         do {
@@ -256,9 +282,17 @@ struct LibraryScanner: Sendable {
             throw AListAPIError.unauthorized
         } catch {
             if error is CancellationError || Task.isCancelled { throw CancellationError() }
-            return nil
+            return Self.isNotFound(error) ? .missing : .failed
         }
-        return items
+        return .items(items)
+    }
+
+    /// AList answers a listing of a path that does not exist inside a working
+    /// storage with this error. Anything else (offline storage, no permission,
+    /// network) is not proof the folder is gone.
+    static func isNotFound(_ error: Error) -> Bool {
+        guard case let AListAPIError.server(_, message) = error else { return false }
+        return message.range(of: "object not found", options: .caseInsensitive) != nil
     }
 
     static func childPath(of item: AListObject, in folder: String) -> String {

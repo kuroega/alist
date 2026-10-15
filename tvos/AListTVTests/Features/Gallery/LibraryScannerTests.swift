@@ -120,6 +120,77 @@ final class LibraryScannerTests: XCTestCase {
         XCTAssertFalse(stored.contains("/TV/Dark/Season 1/Dark.S01E02.mkv"))
     }
 
+    func testDeletedLibraryFolderRemovesEverythingBelowIt() async throws {
+        try await scan(.quick)
+        await server.removeFolder("/TV")
+
+        let recorder = ScanRecorder()
+        let result = try await scan(.quick, recorder: recorder)
+
+        XCTAssertTrue(result.isComplete)
+        XCTAssertEqual(result.foldersMissing, 1)
+        XCTAssertEqual(result.foldersFailed, 0, "A folder the server says is gone is not an unreadable one")
+        XCTAssertEqual(recorder.removed, ["/TV/Dark/Season 1/Dark.S01E01.mkv", "/TV/Dark/Season 1/Dark.S01E02.mkv"])
+        let stored = await storedPaths()
+        XCTAssertEqual(stored, allVideos.filter { $0.hasPrefix("/Movies/") })
+        let baseline = await database.beginScan()
+        XCTAssertNil(baseline.folders["/TV/Dark"])
+        XCTAssertNil(baseline.folders["/TV/Dark/Season 1"])
+    }
+
+    func testEveryLibraryFolderDeletedEmptiesTheLibrary() async throws {
+        try await scan(.quick)
+        for path in roots { await server.removeFolder(path) }
+
+        let recorder = ScanRecorder()
+        let result = try await scan(.quick, recorder: recorder)
+
+        XCTAssertTrue(result.isComplete)
+        XCTAssertEqual(recorder.removed, allVideos)
+        let stored = await storedPaths()
+        XCTAssertTrue(stored.isEmpty)
+    }
+
+    func testCompleteScanForgetsMatchesOfRemovedTitles() async throws {
+        try await scan(.quick)
+        let key = { (path: String) in GalleryMatchKey.key(for: MediaNameParser.parse(path: path)) }
+        let arrival = key("/Movies/Arrival (2016)/Arrival.2016.1080p.mkv")
+        let interstellar = key("/Movies/Interstellar (2014)/Interstellar.2014.2160p.mkv")
+        let dark = key("/TV/Dark/Season 1/Dark.S01E01.mkv")
+        let hit = GalleryMatch(tmdbID: 1, title: "Title", genreIDs: [], matchedAt: Date())
+        for language in ["en-US", "zh-CN"] {
+            database.saveMatches([arrival: hit, interstellar: hit, dark: hit], language: language)
+        }
+        await server.setFolder("/Movies", [GalleryFixtures.folder("/Movies/Interstellar (2014)")])
+        await server.removeFolder("/Movies/Arrival (2016)")
+
+        try await scan(.quick)
+
+        for language in ["en-US", "zh-CN"] {
+            let matches = await database.loadMatches(language: language)
+            XCTAssertEqual(Set(matches.keys), [interstellar, dark], language)
+        }
+    }
+
+    func testIncompleteScanKeepsMatches() async throws {
+        try await scan(.quick)
+        let arrival = GalleryMatchKey.key(for: MediaNameParser.parse(path: "/Movies/Arrival (2016)/Arrival.2016.1080p.mkv"))
+        database.saveMatches([arrival: GalleryMatch(tmdbID: 1, title: "Arrival", genreIDs: [], matchedAt: Date())], language: "en-US")
+        for path in roots { await server.setUnreadable(path, true) }
+
+        try await scan(.full)
+
+        let matches = await database.loadMatches(language: "en-US")
+        XCTAssertEqual(Set(matches.keys), [arrival])
+    }
+
+    func testOnlyNotFoundCountsAsDeleted() {
+        XCTAssertTrue(LibraryScanner.isNotFound(AListAPIError.server(code: 500, message: "failed get objs: failed get dir: object not found")))
+        XCTAssertFalse(LibraryScanner.isNotFound(AListAPIError.server(code: 500, message: "failed get storage: storage not found; please add a storage first")))
+        XCTAssertFalse(LibraryScanner.isNotFound(AListAPIError.server(code: 500, message: "storage not init: network error")))
+        XCTAssertFalse(LibraryScanner.isNotFound(AListAPIError.transport(message: "object not found")))
+    }
+
     func testUnreadableFolderKeepsWhatWasKnownBelowIt() async throws {
         try await scan(.quick)
         await server.setUnreadable("/TV/Dark", true)

@@ -94,6 +94,25 @@ final class GalleryDatabaseTests: XCTestCase {
         XCTAssertEqual(state.roots, ["/Movies"])
     }
 
+    func testFinishScanForgetsMatchesNoVideoUses() async {
+        let database = GalleryDatabase(directory: directory)
+        let kept = file("/Movies/A/Interstellar.2014.mkv")
+        let gone = file("/Movies/B/Arrival.2016.mkv")
+        let keptKey = GalleryMatchKey.key(for: kept.parsed)
+        let goneKey = GalleryMatchKey.key(for: gone.parsed)
+        database.recordListing(folder: GalleryFolderRecord(path: "/Movies/A", listedAt: Date()), subfolders: [], files: [kept], scanID: 1)
+        database.recordListing(folder: GalleryFolderRecord(path: "/Movies/B", listedAt: Date()), subfolders: [], files: [gone], scanID: 1)
+        database.saveMatches([keptKey: match(157_336, title: "Interstellar"), goneKey: match(329_865, title: "Arrival")], language: "en-US")
+        database.saveMatches([goneKey: match(nil, title: nil)], language: "zh-CN")
+        database.markSeen(["/Movies/A"], scanID: 2)
+        database.finishScan(scanID: 2, removedFiles: [gone.path], roots: ["/Movies"], full: true, at: Date())
+
+        let english = await database.loadMatches(language: "en-US")
+        XCTAssertEqual(Set(english.keys), [keptKey])
+        let chinese = await database.loadMatches(language: "zh-CN")
+        XCTAssertTrue(chinese.isEmpty)
+    }
+
     func testFirstReleaseJSONCacheIsImportedOnceKeepingOnlyExactMatches() async throws {
         struct LegacySnapshot: Encodable {
             var files: [LibraryFile]

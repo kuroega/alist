@@ -197,6 +197,20 @@ final class GalleryDatabase: @unchecked Sendable {
         return LibraryFile(path: path, name: name, size: row.int(3) ?? 0, modified: row.text(4), parsed: parsed)
     }
 
+    /// Every stored video with its folder, parsed by the current parser
+    /// (without saving rows written by an older one).
+    private static func forEachCurrentFile(_ connection: SQLiteConnection, _ body: (LibraryFile, String) -> Void) throws {
+        try connection.query("""
+        SELECT path, folder, name, size, modified, kind, title, year, season, episode, episode_title, qualities, parser_version FROM files
+        """) { row in
+            guard var file = Self.file(from: row), let folder = row.text(1) else { return }
+            if Int(row.int(12) ?? 0) != MediaNameParser.version {
+                file = LibraryFile(path: file.path, name: file.name, size: file.size, modified: file.modified, parsed: MediaNameParser.parse(path: file.path))
+            }
+            body(file, folder)
+        }
+    }
+
     private static func insert(_ file: LibraryFile, folder: String, into connection: SQLiteConnection) throws {
         let parsed = file.parsed
         try connection.run("""
@@ -241,13 +255,7 @@ final class GalleryDatabase: @unchecked Sendable {
                 )
             }
             var filesByFolder: [String: [LibraryFile]] = [:]
-            try connection.query("""
-            SELECT path, folder, name, size, modified, kind, title, year, season, episode, episode_title, qualities, parser_version FROM files
-            """) { row in
-                guard var file = Self.file(from: row), let folder = row.text(1) else { return }
-                if Int(row.int(12) ?? 0) != MediaNameParser.version {
-                    file = LibraryFile(path: file.path, name: file.name, size: file.size, modified: file.modified, parsed: MediaNameParser.parse(path: file.path))
-                }
+            try Self.forEachCurrentFile(connection) { file, folder in
                 filesByFolder[folder, default: []].append(file)
             }
             return LibraryScanBaseline(scanID: scanID, folders: folders, filesByFolder: filesByFolder)
@@ -299,13 +307,15 @@ final class GalleryDatabase: @unchecked Sendable {
 
     /// Closes a pass that visited every folder: folders it did not see are
     /// gone from the server (or outside the library folders), and so are
-    /// the videos it reports removed.
+    /// the videos it reports removed. TMDB matches no remaining video uses
+    /// go with them.
     func finishScan(scanID: Int64, removedFiles: [String], roots: [String], full: Bool, at date: Date) {
         write { connection in
             try connection.run("DELETE FROM folders WHERE scan_id IS NULL OR scan_id != ?", [.int(scanID)])
             for path in removedFiles {
                 try connection.run("DELETE FROM files WHERE path = ?", [.text(path)])
             }
+            try Self.removeOrphanedMatches(connection)
             let stamp = String(date.timeIntervalSince1970)
             try Self.setMeta(MetaKey.completedAt, stamp, connection)
             if full { try Self.setMeta(MetaKey.fullCompletedAt, stamp, connection) }
@@ -354,6 +364,21 @@ final class GalleryDatabase: @unchecked Sendable {
         write { connection in
             try connection.run("DELETE FROM matches")
         }
+    }
+
+    /// Drops matches (in every language) for titles no stored video has any
+    /// more, and those made by an older matcher, which are never read again.
+    private static func removeOrphanedMatches(_ connection: SQLiteConnection) throws {
+        var used = Set<String>()
+        try forEachCurrentFile(connection) { file, _ in used.insert(GalleryMatchKey.key(for: file.parsed)) }
+        var orphaned: [String] = []
+        try connection.query("SELECT DISTINCT key FROM matches") { row in
+            if let key = row.text(0), !used.contains(key) { orphaned.append(key) }
+        }
+        for key in orphaned {
+            try connection.run("DELETE FROM matches WHERE key = ?", [.text(key)])
+        }
+        try connection.run("DELETE FROM matches WHERE matcher_version != ?", [.int(Int64(GalleryMatcher.version))])
     }
 
     private static func insert(_ match: GalleryMatch, key: String, language: String, encoder: JSONEncoder, into connection: SQLiteConnection) throws {
