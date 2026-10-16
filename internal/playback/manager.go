@@ -71,6 +71,11 @@ type Session struct {
 	// served as EXT-X-MAP. HLS media segments must not carry their own init
 	// data, so it is captured from the first encoded segment and reused.
 	init [variantCount][]byte
+	// audioDelay is the video presentation delay that every segment's audio
+	// is placed after, fixed by the first encoded segment so adjacent audio
+	// runs stay contiguous even if a later GOP reorders differently.
+	audioDelay      float64
+	audioDelayKnown bool
 }
 
 // Variant selects how a session packages its video. Both variants share the
@@ -529,12 +534,23 @@ func (m *Manager) Segment(ctx context.Context, id string, variant Variant, n int
 	duration := s.Index.Boundaries[n+1] - start
 	seek := s.Index.seekTimes[n]
 	videoCodec := s.Index.VideoCodec
+	// The last interval ends at the container duration, not a keyframe, so
+	// its video legitimately stops short of the slot.
+	final := n == len(s.Index.Boundaries)-2
 	m.mu.Unlock()
 
 	encodeCtx, cancel := context.WithTimeout(ctx, encodeTimeout)
 	stop := context.AfterFunc(s.ctx, cancel)
 	encodeStart := time.Now()
-	data, err := m.encode(encodeCtx, cancel, sourceURL, videoCodec, variant, seek, start, duration)
+	settleAudioDelay := func(measured float64) float64 {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if !s.audioDelayKnown {
+			s.audioDelay, s.audioDelayKnown = measured, true
+		}
+		return s.audioDelay
+	}
+	data, err := m.encode(encodeCtx, cancel, sourceURL, videoCodec, variant, seek, start, duration, !final, settleAudioDelay)
 	if err == nil {
 		err = encodeCtx.Err()
 	}
@@ -616,7 +632,12 @@ func (m *Manager) Init(ctx context.Context, id string, variant Variant) ([]byte,
 	return s.init[variant], nil
 }
 
-func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceURL, videoCodec string, variant Variant, seek, start, duration float64) ([]byte, error) {
+// aacPrimingSamples is the encoder delay FFmpeg's AAC encoder emits at the
+// start of every independently encoded segment; players without an edit list
+// render it, so segment audio content already trails its decode time by it.
+const aacPrimingSamples = 1024
+
+func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceURL, videoCodec string, variant Variant, seek, start, duration float64, tileVideo bool, settleAudioDelay func(float64) float64) ([]byte, error) {
 	limit := min(int64(maxSegmentBytes), m.config.MaxCacheBytes)
 	out := &segmentBuffer{limit: int(limit), cancel: cancel}
 	bsf := "h264_mp4toannexb"
@@ -640,7 +661,11 @@ func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceU
 	// preroll before the MP4 muxer normalizes timestamps, and exclude the next
 	// interval's frames. Otherwise a 10-second interval can contain 15 seconds
 	// of video but only 10 seconds of audio, overlapping the following segment.
-	bsf += fmt.Sprintf(",noise=drop='lt(pts*tb,0)+gte(pts*tb,%s)'", seconds(duration))
+	// Compare half a tick past each pts: duration is a float difference of two
+	// boundaries (6.715000000000003), so a keyframe exactly on the next
+	// boundary (6715 * 0.001) would otherwise also be kept here, repeating it
+	// and drifting players that accumulate sample durations.
+	bsf += fmt.Sprintf(",noise=drop='lt((pts+0.5)*tb,0)+gte((pts+0.5)*tb,%s)'", seconds(duration))
 	// Independently encoded AAC is emitted in whole 1024-sample frames.
 	// Anchor the number of decoded frames to a single global sample grid;
 	// rounding each segment's duration independently leaves a partial last
@@ -730,8 +755,26 @@ func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceU
 	if err := shiftSegmentTimeline(out.data, start); err != nil {
 		return nil, fmt.Errorf("playback segment timeline: %w", err)
 	}
-	if err := alignAACFrameTimeline(out.data, uint64(firstFrame)*1024); err != nil {
+	// Stream-copied B-frame video is presented one reorder delay after the
+	// source (about 83 ms for two B-frames at 24 fps), while the AAC content
+	// trails only by its priming frame. Place audio the remaining delay later
+	// so speech lines up with lips; every segment uses the session's value,
+	// keeping adjacent audio runs contiguous on the shifted grid.
+	videoDelay, err := videoPresentationDelay(out.data)
+	if err != nil {
+		return nil, fmt.Errorf("playback segment video delay: %w", err)
+	}
+	if settleAudioDelay != nil {
+		videoDelay = settleAudioDelay(videoDelay)
+	}
+	audioDelaySamples := max(0, int64(math.Round(videoDelay*48000))-aacPrimingSamples)
+	if err := alignAACFrameTimeline(out.data, uint64(firstFrame)*1024+uint64(audioDelaySamples)); err != nil {
 		return nil, fmt.Errorf("playback segment AAC timeline: %w", err)
+	}
+	if tileVideo {
+		if err := alignVideoSlot(out.data, start, start+duration); err != nil {
+			return nil, fmt.Errorf("playback segment video timeline: %w", err)
+		}
 	}
 	return out.data, nil
 }

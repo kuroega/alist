@@ -3,6 +3,8 @@ package playback
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"math"
 )
 
 // shiftSegmentTimeline moves every sample decode time in a self-initialized
@@ -95,6 +97,285 @@ func shiftSegmentTimeline(data []byte, start float64) error {
 		return errors.New("no tfdt patched")
 	}
 	return nil
+}
+
+// alignVideoSlot makes the video sample durations of a segment add up to its
+// playlist slot [start, end). VLC 4 reads tfdt only after a discontinuity and
+// otherwise accumulates trun durations, so any excess or shortfall shifts every
+// later frame until the next seek. Muxed durations miss the slot because the
+// last one is guessed from the source's rounded timestamps, and because DTS
+// derived for stream-copied B-frames can leave one oversized gap.
+//
+// A shortfall extends the last sample, which moves no presentation time in
+// this segment. An excess shortens the last sample when it can, otherwise the
+// longest gap, raising the composition offsets of the samples after it by the
+// same amount so their presentation times stay put. A sample presented at or
+// past the slot end belongs to the next segment and is reported, not hidden.
+// Run after shiftSegmentTimeline.
+func alignVideoSlot(data []byte, start, end float64) error {
+	moov, ok := findTopBox(data, "moov", 1<<20)
+	if !ok {
+		return errors.New("moov not found")
+	}
+	videoID := trackIDWithHandler(moov, "vide")
+	timescale := trackTimescales(moov)[videoID]
+	if videoID == 0 || timescale == 0 {
+		return errors.New("video track not found")
+	}
+	slot := int64(math.Round(end*float64(timescale))) - int64(math.Round(start*float64(timescale)))
+	var samples []trunSample
+	var walkErr error
+	eachBox(data, func(typ string, moof []byte) bool {
+		if typ != "moof" {
+			return true
+		}
+		eachBox(moof, func(typ string, traf []byte) bool {
+			if typ != "traf" {
+				return true
+			}
+			var id uint32
+			eachBox(traf, func(typ string, p []byte) bool {
+				if typ == "tfhd" && len(p) >= 8 {
+					id = binary.BigEndian.Uint32(p[4:8])
+				}
+				return true
+			})
+			if id != videoID {
+				return true
+			}
+			eachBox(traf, func(typ string, p []byte) bool {
+				if typ != "trun" {
+					return true
+				}
+				run, err := trunSamples(p)
+				if err != nil {
+					walkErr = err
+					return false
+				}
+				samples = append(samples, run...)
+				return true
+			})
+			return walkErr == nil
+		})
+		return walkErr == nil
+	})
+	if walkErr != nil {
+		return walkErr
+	}
+	if len(samples) == 0 || samples[0].duration == nil {
+		// Constant-duration runs carry no per-sample field to adjust in place.
+		return nil
+	}
+	var sum int64
+	for _, s := range samples {
+		sum += s.getDuration()
+	}
+	excess := sum - slot
+	if excess == 0 {
+		return nil
+	}
+	last := len(samples) - 1
+	if excess < 0 {
+		if 2*-excess*int64(len(samples)) >= slot {
+			return fmt.Errorf("video interval spans %d ticks, slot is %d: a frame is missing", sum, slot)
+		}
+		samples[last].setDuration(samples[last].getDuration() - excess)
+		return nil
+	}
+	// The first sample is the keyframe opening the slot; its composition
+	// offset is the reorder delay every presentation time carries.
+	var dts int64
+	origin := samples[0].getOffset()
+	for _, s := range samples {
+		if dts+s.getOffset()-origin >= slot {
+			return fmt.Errorf("video interval spans %d ticks, slot is %d: it repeats the next keyframe", sum, slot)
+		}
+		dts += s.getDuration()
+	}
+	if samples[last].getDuration() > excess {
+		samples[last].setDuration(samples[last].getDuration() - excess)
+		return nil
+	}
+	gap := 0
+	for i, s := range samples[:last] {
+		if s.getDuration() > samples[gap].getDuration() {
+			gap = i
+		}
+	}
+	if samples[gap].getDuration() <= excess {
+		return fmt.Errorf("video interval spans %d ticks, slot is %d: no gap absorbs the excess", sum, slot)
+	}
+	for _, s := range samples[gap+1:] {
+		if s.offset == nil {
+			return fmt.Errorf("video interval spans %d ticks, slot is %d: no composition offsets to rebalance", sum, slot)
+		}
+	}
+	samples[gap].setDuration(samples[gap].getDuration() - excess)
+	for _, s := range samples[gap+1:] {
+		s.setOffset(s.getOffset() + excess)
+	}
+	return nil
+}
+
+// videoPresentationDelay returns how long after its decode time the first
+// video sample (the keyframe opening the segment) is presented, in seconds:
+// the B-frame reorder delay that stream-copied video carries into every
+// presentation time, since the muxer starts each track's decode times at the
+// segment origin.
+func videoPresentationDelay(data []byte) (float64, error) {
+	moov, ok := findTopBox(data, "moov", 1<<20)
+	if !ok {
+		return 0, errors.New("moov not found")
+	}
+	videoID := trackIDWithHandler(moov, "vide")
+	timescale := trackTimescales(moov)[videoID]
+	if videoID == 0 || timescale == 0 {
+		return 0, errors.New("video track not found")
+	}
+	var first *trunSample
+	var walkErr error
+	eachBox(data, func(typ string, moof []byte) bool {
+		if typ != "moof" {
+			return true
+		}
+		eachBox(moof, func(typ string, traf []byte) bool {
+			if typ != "traf" {
+				return true
+			}
+			var id uint32
+			eachBox(traf, func(typ string, p []byte) bool {
+				if typ == "tfhd" && len(p) >= 8 {
+					id = binary.BigEndian.Uint32(p[4:8])
+				}
+				return true
+			})
+			if id != videoID {
+				return true
+			}
+			eachBox(traf, func(typ string, p []byte) bool {
+				if typ != "trun" {
+					return true
+				}
+				run, err := trunSamples(p)
+				if err != nil {
+					walkErr = err
+				} else if len(run) > 0 {
+					first = &run[0]
+				}
+				return false
+			})
+			return false
+		})
+		return false
+	})
+	if walkErr != nil {
+		return 0, walkErr
+	}
+	if first == nil {
+		return 0, errors.New("no video samples")
+	}
+	return float64(first.getOffset()) / float64(timescale), nil
+}
+
+// trunSample points at one sample's duration and composition offset fields
+// inside a trun payload; either is nil when the run omits it.
+type trunSample struct {
+	duration, offset []byte
+	signedOffset     bool
+}
+
+func (s trunSample) getDuration() int64  { return int64(binary.BigEndian.Uint32(s.duration)) }
+func (s trunSample) setDuration(v int64) { binary.BigEndian.PutUint32(s.duration, uint32(v)) }
+func (s trunSample) setOffset(v int64)   { binary.BigEndian.PutUint32(s.offset, uint32(v)) }
+func (s trunSample) getOffset() int64 {
+	if s.offset == nil {
+		return 0
+	}
+	if s.signedOffset {
+		return int64(int32(binary.BigEndian.Uint32(s.offset)))
+	}
+	return int64(binary.BigEndian.Uint32(s.offset))
+}
+
+// trunSamples locates the per-sample fields of a trun payload.
+func trunSamples(trun []byte) ([]trunSample, error) {
+	if len(trun) < 8 {
+		return nil, errors.New("short trun")
+	}
+	flags := binary.BigEndian.Uint32(trun[0:4]) & 0xffffff
+	count := int(binary.BigEndian.Uint32(trun[4:8]))
+	off := 8
+	if flags&0x1 != 0 { // data-offset-present
+		off += 4
+	}
+	if flags&0x4 != 0 { // first-sample-flags-present
+		off += 4
+	}
+	stride := 0
+	for _, bit := range []uint32{0x100, 0x200, 0x400, 0x800} {
+		if flags&bit != 0 {
+			stride += 4
+		}
+	}
+	if count < 0 || off+count*stride > len(trun) {
+		return nil, errors.New("truncated trun")
+	}
+	samples := make([]trunSample, count)
+	for i := range samples {
+		at := off + i*stride
+		if flags&0x100 != 0 { // sample-duration-present
+			samples[i].duration = trun[at : at+4]
+			at += 4
+		}
+		if flags&0x200 != 0 { // sample-size-present
+			at += 4
+		}
+		if flags&0x400 != 0 { // sample-flags-present
+			at += 4
+		}
+		if flags&0x800 != 0 { // sample-composition-time-offsets-present
+			samples[i].offset = trun[at : at+4]
+			samples[i].signedOffset = trun[0] == 1
+		}
+	}
+	return samples, nil
+}
+
+// trackIDWithHandler returns the track_ID of the first trak whose handler is
+// handler ("vide", "soun"), or 0.
+func trackIDWithHandler(moov []byte, handler string) uint32 {
+	var found uint32
+	eachBox(moov, func(typ string, trak []byte) bool {
+		if typ != "trak" {
+			return true
+		}
+		var id uint32
+		var match bool
+		eachBox(trak, func(typ string, p []byte) bool {
+			switch typ {
+			case "tkhd":
+				if len(p) >= 24 && p[0] == 1 {
+					id = binary.BigEndian.Uint32(p[20:24])
+				} else if len(p) >= 16 && p[0] == 0 {
+					id = binary.BigEndian.Uint32(p[12:16])
+				}
+			case "mdia":
+				eachBox(p, func(typ string, p []byte) bool {
+					if typ == "hdlr" && len(p) >= 12 && string(p[8:12]) == handler {
+						match = true
+					}
+					return true
+				})
+			}
+			return true
+		})
+		if match {
+			found = id
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 // alignAACFrameTimeline places independently encoded AAC fragments on one

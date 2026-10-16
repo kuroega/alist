@@ -3,6 +3,7 @@ package playback
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"testing"
 )
 
@@ -190,4 +191,79 @@ func TestShiftSegmentTimelineDegrades(t *testing.T) {
 	if err := shiftSegmentTimeline(data, -1); err == nil {
 		t.Fatal("expected error on negative start")
 	}
+}
+
+// trun builds a version 0 trun with data offset plus per-sample duration,
+// size and composition offset fields, the layout ffmpeg writes for video.
+func trun(durations, offsets []uint32) []byte {
+	p := make([]byte, 12+len(durations)*12)
+	binary.BigEndian.PutUint32(p[0:4], 0x1|0x100|0x200|0x800)
+	binary.BigEndian.PutUint32(p[4:8], uint32(len(durations)))
+	for i, d := range durations {
+		at := 12 + i*12
+		binary.BigEndian.PutUint32(p[at:at+4], d)
+		binary.BigEndian.PutUint32(p[at+4:at+8], 1000+uint32(i)) // size
+		binary.BigEndian.PutUint32(p[at+8:at+12], offsets[i])
+	}
+	return mkbox("trun", p)
+}
+
+// videoTiming decodes a single-trun segment built by trun into the summed
+// durations and each sample's presentation time relative to the keyframe.
+func videoTiming(data []byte) (sum int64, presentations []int64) {
+	run := data[bytes.LastIndex(data, []byte("trun"))+4:]
+	count := int(binary.BigEndian.Uint32(run[4:8]))
+	var dts int64
+	origin := int64(binary.BigEndian.Uint32(run[12+8 : 12+12]))
+	for i := 0; i < count; i++ {
+		at := 12 + i*12
+		presentations = append(presentations, dts+int64(binary.BigEndian.Uint32(run[at+8:at+12]))-origin)
+		dts += int64(binary.BigEndian.Uint32(run[at : at+4]))
+	}
+	return dts, presentations
+}
+
+func TestAlignVideoSlot(t *testing.T) {
+	vide := make([]byte, 12)
+	copy(vide[8:12], "vide")
+	moov := mkbox("moov", mkbox("trak", bytes.Join([][]byte{tkhdV0(1),
+		mkbox("mdia", bytes.Join([][]byte{mdhdV0(16000), mkbox("hdlr", vide)}, nil))}, nil)))
+	segment := func(durations, offsets []uint32) []byte {
+		return bytes.Join([][]byte{moov, mkbox("moof", mkbox("traf",
+			bytes.Join([][]byte{tfhd(1), tfdtV1(0), trun(durations, offsets)}, nil)))}, nil)
+	}
+	// Millisecond source timestamps at 23.976 fps give 656/672-tick frames;
+	// the muxer's guessed final duration leaves the run 16 ticks short.
+	t.Run("shortfall", func(t *testing.T) {
+		data := segment([]uint32{672, 656, 656}, []uint32{1328, 1328, 1328})
+		if err := alignVideoSlot(data, 0, 2000.0/16000); err != nil {
+			t.Fatal(err)
+		}
+		if sum, _ := videoTiming(data); sum != 2000 {
+			t.Fatalf("durations sum to %d, want 2000", sum)
+		}
+	})
+	// The next segment's keyframe, presented exactly at the slot end.
+	t.Run("repeated keyframe", func(t *testing.T) {
+		data := segment([]uint32{656, 656, 656, 656}, []uint32{1328, 1328, 1328, 1328})
+		if err := alignVideoSlot(data, 0, 1968.0/16000); err == nil {
+			t.Fatal("expected the repeated keyframe to be reported")
+		}
+	})
+	// Stream-copied B-frames whose derived DTS opens with an oversized gap:
+	// the frames are right but their durations overshoot the slot.
+	t.Run("oversized gap", func(t *testing.T) {
+		data := segment([]uint32{2000, 656, 656, 656}, []uint32{1328, 0, 0, 0})
+		_, before := videoTiming(data)
+		if err := alignVideoSlot(data, 0, 2656.0/16000); err != nil {
+			t.Fatal(err)
+		}
+		sum, after := videoTiming(data)
+		if sum != 2656 {
+			t.Fatalf("durations sum to %d, want 2656", sum)
+		}
+		if fmt.Sprint(before) != fmt.Sprint(after) {
+			t.Fatalf("presentation times moved: %v -> %v", before, after)
+		}
+	})
 }

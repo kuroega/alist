@@ -340,7 +340,7 @@ func TestEncodeSurfacesSanitizedFFmpegFailure(t *testing.T) {
 	defer m.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, err = m.encode(ctx, cancel, server.URL+"/movie.mkv?sign=capability-token", "h264", Compatible, 0, 0, 6)
+	_, err = m.encode(ctx, cancel, server.URL+"/movie.mkv?sign=capability-token", "h264", Compatible, 0, 0, 6, true, nil)
 	if err == nil {
 		t.Fatal("expected ffmpeg to fail on a non-media source")
 	}
@@ -744,6 +744,19 @@ func TestEncodedSegmentsExcludeSeekPreroll(t *testing.T) {
 			if err := json.Unmarshal(output, &probe); err != nil {
 				t.Fatal(err)
 			}
+			// Audio is placed after the grid by the video's reorder delay less
+			// AAC priming, so both reach the viewer equally late.
+			audioShift := math.NaN()
+			for _, packet := range probe.Packets {
+				if packet.Stream == 0 && strings.Contains(packet.Flags, "K") {
+					pts, _ := strconv.ParseFloat(packet.PTS, 64)
+					audioShift = math.Max(0, math.Round((pts-start)*48000)-aacPrimingSamples) / 48000
+					break
+				}
+			}
+			if math.IsNaN(audioShift) {
+				t.Fatal("segment has no keyframe")
+			}
 			// AAC frames are whole 1024-sample units on a global grid.
 			// A fractional final packet only *claims* to end at EXTINF;
 			// decoders still output its full 1024 samples and drift on VOD.
@@ -762,7 +775,7 @@ func TestEncodedSegmentsExcludeSeekPreroll(t *testing.T) {
 					continue
 				}
 				audioEnd, err := strconv.ParseFloat(stream.Duration, 64)
-				wantEnd := math.Round(end*48000/1024) * 1024 / 48000
+				wantEnd := math.Round(end*48000/1024)*1024/48000 + audioShift
 				if err != nil || math.Abs(audioEnd-wantEnd) > 0.001 {
 					t.Fatalf("audio end %s != global AAC boundary %.6f", stream.Duration, wantEnd)
 				}
@@ -776,7 +789,7 @@ func TestEncodedSegmentsExcludeSeekPreroll(t *testing.T) {
 					}
 					if audioFrames == 0 {
 						pts, err := strconv.ParseFloat(packet.PTS, 64)
-						want := math.Round(start*48000/1024) * 1024 / 48000
+						want := math.Round(start*48000/1024)*1024/48000 + audioShift
 						if err != nil || math.Abs(pts-want) > 0.001 {
 							t.Fatalf("AAC begins at %s instead of %.6f", packet.PTS, want)
 						}
@@ -834,5 +847,232 @@ func TestEncodedSegmentsExcludeSeekPreroll(t *testing.T) {
 	}
 	if !bytes.Equal(init, inits[1]) {
 		t.Fatal("Manager.Init did not return the shared initialization segment")
+	}
+}
+
+// VLC 4 reads tfdt only after a discontinuity and otherwise accumulates trun
+// sample durations, so every segment's video must tile its playlist slot
+// exactly: no frame repeated across a boundary and no duration shortfall.
+// A 23.976 fps source with 161-frame GOPs gives fractional millisecond
+// boundaries whose float differences previously kept the next segment's
+// keyframe, drifting video ~42 ms later per affected segment.
+func TestAdjacentSegmentsTileVideoTimeline(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Skip("ffprobe not installed")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	source := filepath.Join(t.TempDir(), "source.mkv")
+	cmd := exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", "testsrc2=size=128x72:rate=24000/1001",
+		"-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+		"-t", "75", "-c:v", "libx264", "-preset", "ultrafast",
+		"-g", "161", "-keyint_min", "161", "-sc_threshold", "0", "-bf", "2",
+		"-c:a", "ac3", source)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("generate 23.976 fps source: %v: %s", err, output)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, source)
+	}))
+	defer server.Close()
+	m := NewManager(Config{FFmpeg: ffmpeg})
+	defer m.Close()
+	info, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := m.Open(ctx, "test\x00tile\x001", server.URL+"/p/source?sign=test&internal_playback=1", info.Size())
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundaries := session.Index.Boundaries
+	if len(boundaries) < 8 {
+		t.Fatalf("index has %d boundaries, want several fractional GOP boundaries", len(boundaries))
+	}
+	seen := map[int64]int{}
+	frames := 0
+	// The final interval ends at the container duration rather than a
+	// keyframe, so only full keyframe-to-keyframe slots must tile exactly.
+	for n := 0; n < len(boundaries)-2; n++ {
+		data, err := m.Segment(ctx, session.ID, Compatible, n)
+		if err != nil {
+			t.Fatalf("segment %d: %v", n, err)
+		}
+		segment := filepath.Join(t.TempDir(), "segment.mp4")
+		if err := os.WriteFile(segment, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		output, err := exec.CommandContext(ctx, ffprobe, "-v", "error", "-select_streams", "v:0",
+			"-show_entries", "stream=time_base:packet=pts,dts,duration", "-of", "json", segment).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var probe struct {
+			Streams []struct {
+				TimeBase string `json:"time_base"`
+			} `json:"streams"`
+			Packets []struct {
+				PTS      int64 `json:"pts"`
+				DTS      int64 `json:"dts"`
+				Duration int64 `json:"duration"`
+			} `json:"packets"`
+		}
+		if err := json.Unmarshal(output, &probe); err != nil || len(probe.Streams) != 1 || len(probe.Packets) == 0 {
+			t.Fatalf("probe segment %d: %v %s", n, err, output)
+		}
+		var timescale int64
+		if _, err := fmt.Sscanf(probe.Streams[0].TimeBase, "1/%d", &timescale); err != nil || timescale <= 0 {
+			t.Fatalf("segment %d video time base %q", n, probe.Streams[0].TimeBase)
+		}
+		var sum int64
+		for _, packet := range probe.Packets {
+			if previous, ok := seen[packet.PTS]; ok {
+				t.Fatalf("video pts %d appears in segments %d and %d", packet.PTS, previous, n)
+			}
+			seen[packet.PTS] = n
+			sum += packet.Duration
+		}
+		frames += len(probe.Packets)
+		slot := int64(math.Round(boundaries[n+1]*float64(timescale))) - int64(math.Round(boundaries[n]*float64(timescale)))
+		if sum != slot {
+			t.Fatalf("segment %d video durations sum to %d ticks, slot %.6f-%.6f is %d (1/%d)",
+				n, sum, boundaries[n], boundaries[n+1], slot, timescale)
+		}
+		if first := probe.Packets[0].DTS; first != int64(math.Round(boundaries[n]*float64(timescale))) {
+			t.Fatalf("segment %d video starts at dts %d, want %d", n, first, int64(math.Round(boundaries[n]*float64(timescale))))
+		}
+	}
+	if want := (len(boundaries) - 2) * 161; frames != want {
+		t.Fatalf("segments contain %d video frames, want %d", frames, want)
+	}
+}
+
+// Stream-copied B-frame video is presented one reorder delay (the first
+// sample's composition offset) after the source, while re-encoded AAC only
+// trails by its 1024-sample priming. Audio must carry the same delay as the
+// video so lips and speech line up: measure both against the source.
+func TestAudioContentMatchesVideoPresentation(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Skip("ffprobe not installed")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.mkv")
+	// A 20 ms 1 kHz beep at every k+0.5 s gives unambiguous audio onsets.
+	cmd := exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", "testsrc2=size=128x72:rate=24",
+		"-f", "lavfi", "-i", `aevalsrc=exprs=if(lt(mod(t+0.5\,1)\,0.02)\,0.8*sin(2*PI*1000*t)\,0):s=48000`,
+		"-t", "21", "-c:v", "libx264", "-preset", "ultrafast",
+		"-g", "120", "-keyint_min", "120", "-sc_threshold", "0", "-bf", "2",
+		"-c:a", "ac3", source)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("generate beeping source: %v: %s", err, output)
+	}
+	// onsets decodes a file's first audio stream and returns each beep's start
+	// in seconds on that stream's own timeline.
+	onsets := func(path string) []float64 {
+		t.Helper()
+		out, err := exec.CommandContext(ctx, ffprobe, "-v", "error", "-select_streams", "a:0",
+			"-show_entries", "packet=pts_time", "-read_intervals", "%+#1", "-of", "csv=p=0", path).Output()
+		first, perr := strconv.ParseFloat(strings.Trim(strings.Split(string(out), "\n")[0], " ,\r"), 64)
+		if err != nil || perr != nil {
+			t.Fatalf("probe audio start of %s: %v %v %q", path, err, perr, out)
+		}
+		pcm, err := exec.CommandContext(ctx, ffmpeg, "-v", "error", "-i", path, "-map", "0:a:0",
+			"-ac", "1", "-ar", "48000", "-f", "s16le", "-").Output()
+		if err != nil {
+			t.Fatalf("decode audio of %s: %v", path, err)
+		}
+		var found []float64
+		quiet := 0
+		for i := 0; i+1 < len(pcm); i += 2 {
+			v := int16(binary.LittleEndian.Uint16(pcm[i:]))
+			if v > 4000 || v < -4000 {
+				if quiet > 4800 || len(found) == 0 && quiet == i/2 {
+					found = append(found, first+float64(i/2)/48000)
+				}
+				quiet = 0
+				continue
+			}
+			quiet++
+		}
+		return found
+	}
+	sourceOnsets := onsets(source)
+	if len(sourceOnsets) < 15 {
+		t.Fatalf("source has %d beeps", len(sourceOnsets))
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, source)
+	}))
+	defer server.Close()
+	m := NewManager(Config{FFmpeg: ffmpeg})
+	defer m.Close()
+	info, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := m.Open(ctx, "test\x00lipsync\x001", server.URL+"/p/source?sign=test&internal_playback=1", info.Size())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for n := 0; n < len(session.Index.Boundaries)-2; n++ {
+		start := session.Index.Boundaries[n]
+		data, err := m.Segment(ctx, session.ID, Compatible, n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		segment := filepath.Join(dir, fmt.Sprintf("segment-%d.mp4", n))
+		if err := os.WriteFile(segment, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.CommandContext(ctx, ffprobe, "-v", "error", "-select_streams", "v:0",
+			"-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", segment).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The keyframe opening the slot is the source frame at start.
+		videoDelay := math.NaN()
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			fields := strings.Split(line, ",")
+			if len(fields) >= 2 && strings.Contains(fields[1], "K") {
+				pts, _ := strconv.ParseFloat(fields[0], 64)
+				videoDelay = pts - start
+				break
+			}
+		}
+		if math.IsNaN(videoDelay) || videoDelay < 0.04 {
+			t.Fatalf("segment %d: B-frame video should be presented after its slot start, delay %.4f", n, videoDelay)
+		}
+		beeps := onsets(segment)
+		if len(beeps) == 0 {
+			t.Fatalf("segment %d has no beep", n)
+		}
+		for _, beep := range beeps {
+			nearest := sourceOnsets[0]
+			for _, s := range sourceOnsets {
+				if math.Abs(beep-videoDelay-s) < math.Abs(beep-videoDelay-nearest) {
+					nearest = s
+				}
+			}
+			// Segment audio sits on a global 1024-sample grid, so its content
+			// may lead or trail the slot by up to half an AAC frame (10.7 ms).
+			if audioDelay := beep - nearest; math.Abs(audioDelay-videoDelay) > 0.012 {
+				t.Fatalf("segment %d: audio trails the source by %.1f ms but video by %.1f ms",
+					n, audioDelay*1000, videoDelay*1000)
+			}
+		}
 	}
 }

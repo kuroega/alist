@@ -297,3 +297,81 @@ Profile 5 基础层是 IPTPQc2，没有 HDR10/SDR 回退。剥离 RPU（type 62�
 - Apple TV 4K（第 2 代）真机：从 60 s 播放到 70 s，duration 3267.6 s，缓冲领先 88 s，
   丢帧 0，吞吐约 72 Mbit/s。
 - 模拟器没有 HEVC 硬解（`isSupported=false`），因此模拟器中 DV 文件仍走 VLC。
+
+## 已定位：VLC 播放数分钟后画面逐渐落后于声音（2026-10-16）
+
+样本：`American.Horror.Story.2011.S13E01.2160p.HULU.WEB-DL.DDP5.1.H.265`（HEVC Main 10，
+SDR，23.976 fps，`has_b_frames=2`，E-AC3 5.1 → 兼容流 AAC）。真机与 Simulator 均在约 3 分钟后
+明显感到**声音超前画面**且持续变大；外挂字幕（应用叠加层，跟随 VLC 时钟）与声音一致；
+**后退 10 秒后立即恢复同步，随后再次漂移。**
+
+### 证据
+
+- **真机 VLC 内部完全按时**：Debug 构建将 libVLC 的 late/drop/时钟消息与 `VLCKitStats`
+  写入 `Library/Caches/vlc-sync.log`（`devicectl device copy from` 取回）。Apple TV 4K（第 2 代）
+  走 VideoToolbox（`x420`，无转换链），连续 957 s：`latePictures=0`、`lostPictures=0`、
+  displayed = decoded，`wallMinusMedia` 恒定 0.320 s（音频主时钟与墙钟一致）。因此 VLC
+  按自己的时间戳准时显示每一帧，问题在于时间戳本身。
+- **VLC 4 只在不连续时读取 `tfdt`**：`modules/demux/mp4/mp4.c` 中仅当
+  `b_resync_time_offset`（seek 或 `mfhd` 序号不连续）时用 `tfdt`，否则
+  `i_traf_start_time = p_track->i_time`，即累加 `trun` 样本时长。本后端为避免预测重置而使
+  `mfhd` 全局连续，所以 VLC 整场只依赖累加时长；seek 会重新读取 `tfdt`，与“后退即恢复”一致。
+- **分片视频时长不等于播放列表槽位**：从 VM 取同一会话 0–29 号真实分片（230 s）。
+  逐帧按包大小与原 MKV 对齐，PTS 恒为源 +0.083 s，`tfdt` 也正确；但约一半分片视频多出
+  一帧（如 5 号槽 6.715 s 却有 162 帧、时长和 6.755 s），共 14 个关键帧在相邻两片中重复
+  （46.463、61.686、78.119 s…）；其余分片时长和比槽位少 1 ms。音频内容与原件互相关恒为
+  约 −20 ms（AAC priming），无漂移。
+- **机制**：裁剪使用 `noise=drop='…gte(pts*tb,duration)'`，`duration` 为两个边界的浮点差
+  （`6.715000000000003`），而下一槽关键帧为 `6715*0.001`，比较为假而被保留。VLC 每遇一个
+  重复帧就把后续视频推迟约 42 ms：3 分钟约 10 个，约 0.4 s；每片少 1 ms 则反向缓慢累积。
+- Simulator 另有独立问题：无 HEVC 硬解，avcodec 软解后经 `swscale`（I0AL→BGRA，Bicubic，
+  C 实现）逐帧转换，vout 跟不上，显示帧延迟在一分钟内从 31 ms 增至 228 ms 并大量丢帧。
+
+### 修复（2026-10-16 已在 VM 部署）
+
+- `encode()` 裁剪改为比较 `(pts+0.5)*tb`（半个时基刻度容差），边界帧只属于下一片。
+- `alignVideoSlot`：使每片视频 `trun` 时长和精确等于 `round(end×ts) − round(start×ts)`。
+  不足时延长最后一帧（不改变本片任何显示时间）；超出时先缩短最后一帧，否则缩短最长的
+  DTS 间隔并把其后样本的 composition offset 加同量，显示时间不变（处理流复制 B 帧时推导出
+  的超大首个 DTS 间隔，如 x265 测试样本）。若有样本显示于槽位末端或之后（重复下一关键帧），
+  报错而非掩盖。末片以容器时长结束，不做对齐。
+- 回归测试 `TestAdjacentSegmentsTileVideoTimeline`（23.976 fps、161 帧 GOP、小数毫秒边界）
+  校验相邻分片无重复 PTS、每片时长和等于槽位、首 DTS 等于槽位起点、总帧数正确；去掉容差
+  或对齐任一项都会失败。`TestAlignVideoSlot` 覆盖不足、重复关键帧与超大间隔。本地
+  ffmpeg 9.0.2 与 VM 独立目录 `~/alist-dev-avsync`（ffmpeg 8.1.2，未触碰生产）下 `go test ./internal/playback/...` 均通过。
+- 部署：在 VM 独立目录 `~/alist-dev-avsync`（仓库 HEAD + 本修复；其 Go 源与 `~/build-hvcc` 一致）
+  按原参数构建，`public/dist` 与上一版本相同仅含 README（界面由 `dist_dir` 提供）。原二进制 sha256
+  `14834a98731dfcb25b50ec3236f25d70085f1b15dc655f51d4c462b635575885` 备份于 `/opt/alist/alist.pre-avtile`；
+  当前二进制 sha256 `09745ffa94b516464936d3ba1cc59b9e0640c11d466e2d33086c92bc15a7e340`。`/opt/alist` 中
+  过期的 `internal/playback` 与 `server/handles` 源已同步，旧文件备份于 `/opt/alist.source-pre-avtile.tgz`；
+  配置副本 `/tmp/config.json.pre-deploy`。重启后 `rc-service alist status` 为 started，`/ping`、首页与
+  `/api/public/settings` 正常。用户在 Apple TV 重新打开视频，播放超过 5 分钟仍保持同步（2026-10-16 确认）。
+- 当时未处理：恒定约 63 ms 的声音超前（视频 B 帧延迟 83 ms − AAC priming 约 20 ms），不随时间增长；
+  见下节。
+
+### 修复：恒定约 63 ms 声音超前（2026-10-16 已在 VM 部署）
+
+机制：视频流复制时，muxer 让每片视频的解码时间从槽位起点开始，关键帧带着 B 帧重排延迟
+（首样本 composition offset，2 个 B 帧、24 fps 时为 83 ms）呈现；重编码的 AAC 只晚 1024 个
+priming 采样（21.3 ms）。两者对源都偏晚，但差约 62 ms，表现为声音始终超前画面。
+
+此前尝试改写 composition offset 被解复用器的负 CTS 归一化抵消，按片分别移动音轨 `tfdt`
+又破坏了片间衔接（见上文“新增对照证据及纠正”）。本次只把**整个会话**的音轨统一后移：
+
+- `videoPresentationDelay` 读取每片首个视频样本的 composition offset；会话以第一个编码完成的
+  分片的值为准（`Session.audioDelay`），之后所有分片使用同一值，因此相邻音频仍首尾相接。
+- 音轨 `tfdt` = 全局 AAC 网格起点 + `max(0, round(延迟×48000) − 1024)` 采样（83 ms 时为 2960 采样，
+  61.7 ms）。视频与 `alignVideoSlot` 不变；VLC 在首片或 seek 时读取 `tfdt`，之后累加时长，
+  AVPlayer、hls.js 每片读取 `tfdt`，三者都得到同样的相对位置。无 B 帧的视频不做移动（保留
+  约 21 ms 的声音滞后，可忽略）。末片音频比播放列表多出相同的约 62 ms。
+- 回归测试 `TestAudioContentMatchesVideoPresentation`：24 fps、2 个 B 帧的 H.264 源，每秒在
+  k+0.5 s 放 20 ms 的 1 kHz 提示音；对每片比较解码后提示音相对源的延迟与关键帧呈现相对源的
+  延迟，误差须在 12 ms 内（全局 AAC 网格本身允许 ±10.7 ms）。修复前该测试报告“音频晚 26.3 ms、
+  视频晚 83.0 ms”而失败。`TestEncodedSegmentsExcludeSeekPreroll` 改为期望网格起止点加上该移动量。
+- 本地 ffmpeg 9.0.2 与 VM `~/alist-dev-avsync`（ffmpeg 8.1.2）下 `go test ./internal/playback/...`
+  均通过。尚未在真实片源上逐片复测。
+- 部署：同样在 `~/alist-dev-avsync` 构建（README-only `public/dist`）。原二进制 sha256
+  `09745ffa94b516464936d3ba1cc59b9e0640c11d466e2d33086c92bc15a7e340` 备份于 `/opt/alist/alist.pre-avoffset`；
+  当前二进制 sha256 `69906785c0c0384c7e93248662db56804e3c50c6b92f54bfee1817d5ca01d941`；`/opt/alist` 中
+  `internal/playback` 源已同步，旧文件备份于 `/opt/alist.source-pre-avoffset.tgz`。重启后服务 started，
+  `/ping`、首页与 `/api/public/settings` 正常。用户在 Apple TV 重新打开视频，确认口型同步正确且持续同步（2026-10-16）。
