@@ -308,7 +308,7 @@ SDR，23.976 fps，`has_b_frames=2`，E-AC3 5.1 → 兼容流 AAC）。真机与
 ### 证据
 
 - **真机 VLC 内部完全按时**：Debug 构建将 libVLC 的 late/drop/时钟消息与 `VLCKitStats`
-  写入 `Library/Caches/vlc-sync.log`（`devicectl device copy from` 取回）。Apple TV 4K（第 2 代）
+  写入 `Library/Caches/vlc-sync.log`（`devicectl device copy from` 取回；该诊断日志器在排查结束后已移除，需要时可参考提交 `ea729921` 重新加入）。Apple TV 4K（第 2 代）
   走 VideoToolbox（`x420`，无转换链），连续 957 s：`latePictures=0`、`lostPictures=0`、
   displayed = decoded，`wallMinusMedia` 恒定 0.320 s（音频主时钟与墙钟一致）。因此 VLC
   按自己的时间戳准时显示每一帧，问题在于时间戳本身。

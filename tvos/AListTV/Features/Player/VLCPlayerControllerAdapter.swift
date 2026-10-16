@@ -60,11 +60,7 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
         if let fontURL {
             CTFontManagerRegisterFontsForURL(fontURL as CFURL, .process, nil)
         }
-        let player = VLCMediaPlayer(options: ["--freetype-font=Noto Sans CJK SC"])
-#if DEBUG
-        player.libraryInstance.loggers = [VLCSyncDiagnosticsLogger()]
-#endif
-        return player
+        return VLCMediaPlayer(options: ["--freetype-font=Noto Sans CJK SC"])
     }
 
     func replaceCurrentItem(url: URL, preservingSelections: Bool) {
@@ -375,7 +371,6 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
         // One compact line per sample keeps the `log stream` output greppable.
         let line = "VLCKitStats mediaTime=\(snapshot.currentTime) wallSinceFirst=\(wallSeconds) mediaSinceFirst=\(mediaSeconds) wallMinusMedia=\(wallSeconds - mediaSeconds) audioDelayUs=\(mediaPlayer.currentAudioPlaybackDelay) position=\(mediaPlayer.position) inputBitrate=\(snapshot.inputBitrate) demuxBitrate=\(snapshot.demuxBitrate) decodedVideo=\(snapshot.decodedVideo) decodedAudio=\(snapshot.decodedAudio) displayedPictures=\(snapshot.displayedPictures) latePictures=\(snapshot.latePictures) lostPictures=\(snapshot.lostPictures) playedAudioBuffers=\(snapshot.playedAudioBuffers) lostAudioBuffers=\(snapshot.lostAudioBuffers) demuxDiscontinuity=\(snapshot.demuxDiscontinuity)"
         Self.statisticsLogger.info("\(line, privacy: .public)")
-        VLCSyncDiagnosticsFile.append(line)
     }
 #endif
 
@@ -401,39 +396,3 @@ private extension String {
         return value.isEmpty ? nil : value
     }
 }
-
-#if DEBUG
-/// Forwards libVLC messages that explain A/V sync (late or dropped pictures,
-/// clock and output reconfiguration, decoder/converter selection) to the
-/// unified log so `log stream` can show how far video trails the audio clock.
-private final class VLCSyncDiagnosticsLogger: NSObject, VLCLogging {
-    var level: VLCLogLevel = .debug
-    private static let logger = Logger(subsystem: "com.alist.tv", category: "VLCKitLog")
-    private static let keywords = ["late", "drop", "early", "clock", "chroma", "convert", "videotoolbox", "avcodec", "decoder", "aout", "resampl", "latency", "deadline", "discontinuity", "hurry"]
-
-    func handleMessage(_ message: String, logLevel level: VLCLogLevel, context: VLCLogContext?) {
-        let module = context?.module ?? "?"
-        let haystack = "\(module) \(message)".lowercased()
-        guard level.rawValue <= VLCLogLevel.warning.rawValue || Self.keywords.contains(where: haystack.contains) else { return }
-        Self.logger.info("[\(module, privacy: .public)] \(message, privacy: .public)")
-        VLCSyncDiagnosticsFile.append("[\(module)] \(message)")
-    }
-}
-
-/// Unified logs are hard to reach on a network-paired Apple TV, so mirror the
-/// diagnostics to Caches/vlc-sync.log for `devicectl device copy from`.
-enum VLCSyncDiagnosticsFile {
-    private static let queue = DispatchQueue(label: "com.alist.tv.vlc-sync-log")
-    private static let handle: FileHandle? = {
-        guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
-        let url = caches.appendingPathComponent("vlc-sync.log")
-        FileManager.default.createFile(atPath: url.path, contents: nil)
-        return try? FileHandle(forWritingTo: url)
-    }()
-
-    static func append(_ line: String) {
-        let stamp = String(format: "%.3f", ProcessInfo.processInfo.systemUptime)
-        queue.async { handle?.write(Data("\(stamp) \(line)\n".utf8)) }
-    }
-}
-#endif
