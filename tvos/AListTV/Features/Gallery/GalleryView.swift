@@ -167,7 +167,7 @@ struct GalleryView: View {
                     }
                 }
                 .buttonStyle(.borderless)
-                .contextMenu { menu(for: entry.title, playing: entry.path) }
+                .contextMenu { menu(for: entry.title, playing: entry.path, section: entry.section) }
                 .accessibilityIdentifier("gallery.play.\(entry.path)")
             }
         }
@@ -210,7 +210,7 @@ struct GalleryView: View {
     }
 
     @ViewBuilder
-    private func menu(for title: GalleryTitle, playing path: String?) -> some View {
+    private func menu(for title: GalleryTitle, playing path: String?, section: GalleryPlayEntry.Section? = nil) -> some View {
         let file = path.flatMap { path in viewModel.catalog.episode(forPath: path)?.episode.file }
             ?? viewModel.primaryFile(for: title)
         if let file {
@@ -221,6 +221,9 @@ struct GalleryView: View {
             Button { viewModel.setWatched(false, paths: paths) } label: { Label("Mark as Unwatched", systemImage: "circle") }
         } else {
             Button { viewModel.setWatched(true, paths: paths) } label: { Label("Mark as Watched", systemImage: "checkmark.circle") }
+        }
+        if section == .watching {
+            Button(role: .destructive) { viewModel.removeFromWatching(title) } label: { Label("Remove from Watching", systemImage: "minus.circle") }
         }
         if let file {
             Button { onReveal(file.object) } label: { Label("Show in Browse", systemImage: "folder") }

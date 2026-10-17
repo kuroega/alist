@@ -110,4 +110,42 @@ final class GalleryViewModelTests: XCTestCase {
         let stored = await store.database.loadFiles()
         XCTAssertEqual(stored.count, 2)
     }
+
+    func testRemovingATitleFromWatchingClearsOnlyItsResumePoints() async throws {
+        let server = FakeLibraryServer()
+        await GalleryFixtures.populate(server)
+        let store = GalleryLibraryStore(baseURL: baseURL, username: "alice", defaults: defaults, directory: directory)
+        store.setRoots(["/Movies", "/TV"])
+        store.database.saveMatches([
+            "movie|interstellar|2014": GalleryMatch(tmdbID: 157_336, title: "Interstellar", genreIDs: [878], date: "2014-11-05", matchedAt: Date()),
+            "show|dark": GalleryMatch(tmdbID: 70_523, title: "Dark", genreIDs: [], date: "2017-12-01", matchedAt: Date())
+        ], language: "none")
+        let progress = PlaybackProgressStore(defaults: defaults)
+        let identity = { (path: String) in PlaybackProgressIdentity(baseURL: self.baseURL.absoluteString, username: "alice", virtualPath: path) }
+        let episodes = ["/TV/Dark/Season 1/Dark.S01E01.mkv", "/TV/Dark/Season 1/Dark.S01E02.mkv"]
+        let movie = "/Movies/Interstellar (2014)/Interstellar.2014.2160p.mkv"
+        for path in episodes + [movie] {
+            progress.update(identity: identity(path), position: 600, duration: 3_000)
+        }
+        RecentItemsStore(defaults: defaults).recordOpen(
+            AListObject(virtualPath: episodes[1], name: "Dark.S01E02.mkv", isDirectory: false),
+            account: RecentItemsAccount(baseURL: baseURL.absoluteString, username: "alice")
+        )
+
+        let viewModel = makeViewModel(server: server, store: store, progress: progress)
+        viewModel.onAppear()
+        await waitUntil { viewModel.phase == .ready && viewModel.catalog.videoCount == 4 }
+        let dark = try XCTUnwrap(viewModel.shelves.playEntries.first { $0.path.hasPrefix("/TV/Dark") }?.title)
+        XCTAssertEqual(viewModel.shelves.playEntries.filter { $0.section == .watching }.count, 2)
+
+        viewModel.removeFromWatching(dark)
+
+        // Both episodes lose their resume point, so the show cannot resurface
+        // under Watching through the other one; the movie keeps its own.
+        XCTAssertTrue(episodes.allSatisfy { progress.record(for: identity($0)) == nil })
+        XCTAssertNotNil(progress.record(for: identity(movie)))
+        XCTAssertEqual(viewModel.shelves.playEntries.filter { $0.section == .watching }.map(\.path), [movie])
+        // The opened episode stays in history, under Recently Watched.
+        XCTAssertEqual(viewModel.shelves.playEntries.filter { $0.section == .recent }.map(\.path), [episodes[1]])
+    }
 }

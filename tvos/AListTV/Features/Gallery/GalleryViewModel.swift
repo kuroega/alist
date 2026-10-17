@@ -463,6 +463,15 @@ final class GalleryViewModel: ObservableObject {
         reloadWatchState()
     }
 
+    /// Drops every resume point of a title so it leaves Watching; its history
+    /// and watched marks stay, so it falls back to Recently Watched.
+    func removeFromWatching(_ title: GalleryTitle) {
+        for path in paths(for: title) where watch.progress[path] != nil {
+            progressStore.remove(identity: PlaybackProgressIdentity(baseURL: account.baseURL, username: account.username, virtualPath: path))
+        }
+        reloadWatchState()
+    }
+
     // MARK: Playback
 
     func play(_ file: LibraryFile) {
