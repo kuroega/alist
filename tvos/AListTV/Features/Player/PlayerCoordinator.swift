@@ -67,6 +67,7 @@ final class PlayerCoordinator: ObservableObject {
     private var currentObject: AListObject?
     private var sessionID = UUID()
     private var refreshCount = 0
+    private var lastInterruptionPosition: TimeInterval?
     private var subtitleAppearanceReloadID = UUID()
     private var eventTasks: [ObjectIdentifier: Task<Void, Never>] = [:]
     private var progressTask: Task<Void, Never>?
@@ -155,6 +156,7 @@ final class PlayerCoordinator: ObservableObject {
         sessionID = UUID()
         let activeSession = sessionID
         refreshCount = 0
+        lastInterruptionPosition = nil
         externalSubtitles = []
         externalSubtitleDiscoveryState = .idle
         subtitleSelectionError = nil
@@ -520,6 +522,9 @@ final class PlayerCoordinator: ObservableObject {
                     case .ended:
                         guard self.sessionID == session, self.isPresented, self.state == .playing else { continue }
                         self.beginAutoPlay(session: session)
+                    case let .interrupted(position):
+                        guard self.sessionID == session, self.isPresented, self.state == .playing else { continue }
+                        await self.handleInterruption(at: position, session: session)
                     }
                 }
             }
@@ -613,14 +618,36 @@ final class PlayerCoordinator: ObservableObject {
     private static let audioExtensions: Set<String> = ["mp3", "flac", "ogg", "m4a", "wav", "opus", "wma", "aac"]
 
     private func handleFailure(_ message: String, session: UUID) async {
-        guard sessionID == session, let path = currentObject?.virtualPath else { return }
+        guard sessionID == session, currentObject?.virtualPath != nil else { return }
         guard refreshCount == 0 else {
             controller.pause()
             state = .failed(message: message)
             return
         }
         refreshCount = 1
-        let position = controller.currentTime
+        await reloadMedia(at: controller.currentTime, session: session)
+    }
+
+    /// The stream ended early, typically because the server could not deliver
+    /// a segment. Reopen with a fresh URL where it stopped rather than leaving
+    /// a stopped player that Play would restart from the beginning. A second
+    /// stop without progress is reported instead of retried forever.
+    private func handleInterruption(at position: TimeInterval, session: UUID) async {
+        if let identity = progressIdentity {
+            progressStore.update(identity: identity, position: position, duration: controller.duration)
+        }
+        if let last = lastInterruptionPosition, position < last + Self.minimumProgressBetweenInterruptions {
+            state = .failed(message: "Playback stopped at \(PlaybackPresentation.resumeTimeText(position)) because the server could not deliver the next part of the video.")
+            return
+        }
+        lastInterruptionPosition = position
+        await reloadMedia(at: position, session: session)
+    }
+
+    private static let minimumProgressBetweenInterruptions: TimeInterval = 10
+
+    private func reloadMedia(at position: TimeInterval, session: UUID) async {
+        guard let path = currentObject?.virtualPath else { return }
         let selectionToRestore = subtitleSelection
         do {
             let detail = try await api.get(path: path)

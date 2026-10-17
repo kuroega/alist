@@ -530,6 +530,10 @@ func (m *Manager) Segment(ctx context.Context, id string, variant Variant, n int
 	call := &segmentCall{done: make(chan struct{})}
 	s.segments[segment] = call
 	sourceURL := s.sourceURL
+	readTimeout := rangeTimeout
+	if s.source != nil {
+		readTimeout = sourceReadTimeout
+	}
 	start := s.Index.Boundaries[n]
 	duration := s.Index.Boundaries[n+1] - start
 	seek := s.Index.seekTimes[n]
@@ -550,7 +554,7 @@ func (m *Manager) Segment(ctx context.Context, id string, variant Variant, n int
 		}
 		return s.audioDelay
 	}
-	data, err := m.encode(encodeCtx, cancel, sourceURL, videoCodec, variant, seek, start, duration, !final, settleAudioDelay)
+	data, err := m.encode(encodeCtx, cancel, sourceURL, readTimeout, videoCodec, variant, seek, start, duration, !final, settleAudioDelay)
 	if err == nil {
 		err = encodeCtx.Err()
 	}
@@ -637,7 +641,7 @@ func (m *Manager) Init(ctx context.Context, id string, variant Variant) ([]byte,
 // render it, so segment audio content already trails its decode time by it.
 const aacPrimingSamples = 1024
 
-func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceURL, videoCodec string, variant Variant, seek, start, duration float64, tileVideo bool, settleAudioDelay func(float64) float64) ([]byte, error) {
+func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceURL string, readTimeout time.Duration, videoCodec string, variant Variant, seek, start, duration float64, tileVideo bool, settleAudioDelay func(float64) float64) ([]byte, error) {
 	limit := min(int64(maxSegmentBytes), m.config.MaxCacheBytes)
 	out := &segmentBuffer{limit: int(limit), cancel: cancel}
 	bsf := "h264_mp4toannexb"
@@ -680,7 +684,7 @@ func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceU
 	args := []string{
 		"-hide_banner", "-nostdin", "-loglevel", "warning", "-xerror",
 		"-abort_on", "empty_output+empty_output_stream",
-		"-rw_timeout", "15000000", "-protocol_whitelist", "http,https,tcp,tls,crypto",
+		"-rw_timeout", strconv.FormatInt(readTimeout.Microseconds(), 10), "-protocol_whitelist", "http,https,tcp,tls,crypto",
 		"-probesize", "1048576", "-analyzeduration", "1000000",
 		// Seek inside the indexed GOP to avoid downloading the preceding GOP.
 		// Retain preroll and restore the boundary's timestamp origin; the video

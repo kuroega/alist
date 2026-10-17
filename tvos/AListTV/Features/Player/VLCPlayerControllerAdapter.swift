@@ -36,6 +36,9 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
     private var hasReachedEnd = false
     private var hasEmittedEnded = false
     private var lastObservedTime: TimeInterval = 0
+    /// Where the stream stopped short of the end. VLC reopens a stopped media
+    /// from its start, so playing again seeks back here.
+    private var interruptedTime: TimeInterval?
 #if DEBUG
     private var nextStatisticsLogTime: TimeInterval = 0
     private var statisticsAnchor: (uptime: TimeInterval, media: TimeInterval)?
@@ -75,6 +78,7 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
         hasReachedEnd = false
         hasEmittedEnded = false
         lastObservedTime = 0
+        interruptedTime = nil
         pendingSeekSeconds = nil
         pendingExternalSubtitle = nil
         externalTrackIDs = [:]
@@ -106,13 +110,25 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
         mediaPlayer.media = media
     }
 
-    func play() { mediaPlayer.play() }
+    func play() {
+        if let interruptedTime {
+            self.interruptedTime = nil
+            pendingSeekSeconds = interruptedTime
+        }
+        mediaPlayer.play()
+    }
 
     func pause() { mediaPlayer.pause() }
 
-    func stop() { mediaPlayer.stop() }
+    func stop() {
+        // A requested stop is not an interruption.
+        hasStartedPlayback = false
+        interruptedTime = nil
+        mediaPlayer.stop()
+    }
 
     func seek(to seconds: TimeInterval) async {
+        interruptedTime = nil
         let target = PlaybackPresentation.clampedSeekTarget(seconds, duration: duration)
         guard mediaPlayer.isSeekable else {
             pendingSeekSeconds = target
@@ -243,11 +259,22 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
             if didReachEnd && !hasEmittedEnded {
                 hasEmittedEnded = true
                 continuation.yield(.ended)
+            } else if !didReachEnd, hasStartedPlayback, stoppedDuration > 0, interruptedTime == nil {
+                interruptedTime = stoppedTime
+                continuation.yield(.interrupted(position: stoppedTime))
+            }
+            // A stopped player reports time 0; keep showing where it stopped.
+            if let interruptedTime {
+                currentTime = interruptedTime
+                lastObservedTime = interruptedTime
             }
         case .opening:
             break
         case .error:
             isPlaying = false
+            // The coordinator recovers from the failure; the stop that follows
+            // must not also report an interruption.
+            hasStartedPlayback = false
             let message = VLCLibrary.currentErrorMessage?.isEmpty == false ? VLCLibrary.currentErrorMessage! : "视频播放失败，请检查文件或网络连接。"
             continuation.yield(.failed(message: message))
         @unknown default:

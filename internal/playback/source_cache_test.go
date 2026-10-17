@@ -143,6 +143,56 @@ func TestSourceCacheRetriesTransientChunkFailure(t *testing.T) {
 	}
 }
 
+func TestSourceCacheChunkOutlivesCancelledReader(t *testing.T) {
+	data := []byte("0123456789abcdef")
+	var requests atomic.Int32
+	arrived := make(chan struct{}, 1)
+	unblock := make(chan struct{})
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		arrived <- struct{}{}
+		select {
+		case <-unblock:
+		case <-r.Context().Done():
+			return
+		}
+		http.ServeContent(w, r, "source.mkv", time.Time{}, bytes.NewReader(data))
+	}))
+	defer origin.Close()
+	store, err := newSourceStore(t.TempDir(), 64, int64(len(data)), origin.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := store.acquire("movie:slow", origin.URL, int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.release(entry)
+
+	// ffmpeg gives up on a slow cold chunk and drops its loopback connection.
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := entry.ReadAt(ctx, make([]byte, 4), 0)
+		result <- err
+	}()
+	<-arrived
+	cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled reader returned %v", err)
+	}
+
+	// The download continues, so the retry waits for it instead of restarting.
+	close(unblock)
+	buf := make([]byte, len(data))
+	if n, err := entry.ReadAt(context.Background(), buf, 0); err != nil || n != len(data) || !bytes.Equal(buf, data) {
+		t.Fatalf("retry after cancelled reader: n=%d err=%v", n, err)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("source requests = %d, want 1: a cancelled reader restarted the chunk download", got)
+	}
+}
+
 func TestSourceCacheEvictsInactiveRevision(t *testing.T) {
 	data := bytes.Repeat([]byte("x"), 16)
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

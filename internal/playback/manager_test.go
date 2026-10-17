@@ -340,7 +340,7 @@ func TestEncodeSurfacesSanitizedFFmpegFailure(t *testing.T) {
 	defer m.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, err = m.encode(ctx, cancel, server.URL+"/movie.mkv?sign=capability-token", "h264", Compatible, 0, 0, 6, true, nil)
+	_, err = m.encode(ctx, cancel, server.URL+"/movie.mkv?sign=capability-token", rangeTimeout, "h264", Compatible, 0, 0, 6, true, nil)
 	if err == nil {
 		t.Fatal("expected ffmpeg to fail on a non-media source")
 	}

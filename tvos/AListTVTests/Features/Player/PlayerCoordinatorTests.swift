@@ -324,6 +324,50 @@ final class PlayerCoordinatorTests: XCTestCase {
         XCTAssertEqual(paths, ["/a.mp4", "/a.mp4", "/b.mp4", "/b.mp4"])
     }
 
+    func testInterruptionReopensAtStoppedPosition() async throws {
+        let api = PlayerFakeAPI(details: [
+            detail(url: "https://media.example/first", path: "/video.mp4"),
+            detail(url: "https://media.example/refreshed", path: "/video.mp4")
+        ])
+        let player = PlayerFakeController()
+        player.duration = 3_000
+        let coordinator = makeCoordinator(api: api, player: player)
+        await coordinator.play(object: object("/video.mp4"))
+        let playsBefore = player.playCount
+
+        player.emit(.interrupted(position: 345))
+        try await waitUntil { player.replacedURLs.count == 2 }
+        try await waitUntil { player.playCount == playsBefore + 1 }
+
+        XCTAssertEqual(player.replacedURLs.last?.absoluteString, "https://media.example/refreshed")
+        XCTAssertEqual(player.seekValues.last, 345)
+        XCTAssertEqual(coordinator.state, .playing)
+    }
+
+    func testInterruptionWithoutProgressStopsRetrying() async throws {
+        let api = PlayerFakeAPI(details: [
+            detail(url: "https://media.example/first", path: "/video.mp4"),
+            detail(url: "https://media.example/second", path: "/video.mp4"),
+            detail(url: "https://media.example/third", path: "/video.mp4"),
+            detail(url: "https://media.example/fourth", path: "/video.mp4")
+        ])
+        let player = PlayerFakeController()
+        player.duration = 3_000
+        let coordinator = makeCoordinator(api: api, player: player)
+        await coordinator.play(object: object("/video.mp4"))
+
+        player.emit(.interrupted(position: 345))
+        try await waitUntil { player.replacedURLs.count == 2 }
+        // Progress since the last recovery earns another one.
+        player.emit(.interrupted(position: 600))
+        try await waitUntil { player.replacedURLs.count == 3 }
+        player.emit(.interrupted(position: 603))
+        try await waitUntil { coordinator.isTerminalFailure }
+
+        XCTAssertEqual(player.replacedURLs.count, 3)
+        XCTAssertEqual(player.seekValues.last, 600)
+    }
+
     func testSavedProgressShowsResumePromptUntilConfirmed() async throws {
         let suite = "PlayerCoordinatorTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!

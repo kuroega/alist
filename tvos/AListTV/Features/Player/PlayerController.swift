@@ -4,6 +4,9 @@ enum PlayerEvent: Equatable, Sendable {
     case failed(message: String)
     case paused
     case ended
+    /// The stream ended before the media did (a failed HLS segment ends
+    /// VLC's input), at this position.
+    case interrupted(position: TimeInterval)
 }
 
 struct PlaybackSettingsStore {

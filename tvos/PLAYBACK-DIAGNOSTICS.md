@@ -375,3 +375,43 @@ priming 采样（21.3 ms）。两者对源都偏晚，但差约 62 ms，表现�
   当前二进制 sha256 `69906785c0c0384c7e93248662db56804e3c50c6b92f54bfee1817d5ca01d941`；`/opt/alist` 中
   `internal/playback` 源已同步，旧文件备份于 `/opt/alist.source-pre-avoffset.tgz`。重启后服务 started，
   `/ping`、首页与 `/api/public/settings` 正常。用户在 Apple TV 重新打开视频，确认口型同步正确且持续同步（2026-10-16）。
+
+## 已解决：播放约 5–6 分钟后自动停止，按播放键从头开始（2026-10-17）
+
+样本：某剧第 3 集，1,692,357,343 字节 MKV（Quark 冷读，经原文件缓存）。第 1、2、4 集正常。
+
+### 证据
+
+- VM 日志 17:32 起播该文件，17:39:05 `playback segment 55: 0 bytes in 15.559s err=playback segment
+  conversion failed … Stream ends prematurely at 603979776`；17:39:38 同一文件 `segment 0` 再次生成，
+  即用户按播放后从头开始。之后 88（三次）、100 号分片以同样方式失败，各耗时约 15.4–15.5 s，
+  断点均恰为 32 MiB 分块边界（18、28、32 号分块）。
+- 每跨入一个新的 32 MiB 分块，分片耗时 9–20 s（其余约 0.4 s）。该文件跨块平均 12.1 s、23 次 ≥13 s；
+  同晚另一集平均 10.1 s、14 次 ≥13 s，只是侥幸没超过 15 s。媒体本身没有问题。
+
+### 根因
+
+1. ffmpeg 读本机缓存的 `-rw_timeout` 为 15 s，而冷分块在完整下载前不向 ffmpeg 发送任何字节；Quark
+   约 2 MB/s 时 32 MiB 需 15 s 以上。
+2. 分块下载使用 ffmpeg 请求的 context：ffmpeg 超时断开即取消下载到一半的分块，下一次请求从零重新下载，
+   于是同一分片反复失败（88 号连续三次）。预取同样随连接关闭而取消。
+3. VLC 把失败的 HLS 分片当作输入结束而停止；适配器只在接近片尾时上报 `.ended`，其余停止静默。
+   对已停止的 VLC 调用 `play()` 会从头打开媒体。
+
+### 修复
+
+- 后端：`ensureChunk` 在独立 goroutine 中以 `context.WithoutCancel` 下载分块（仍受 `sourceChunkTimeout`
+  一分钟限制，期间 retain 缓存条目防止被淘汰），读者断开只停止等待；预取因此也能在 ffmpeg 退出后继续。
+  读本机缓存时 `-rw_timeout` 改为 `sourceReadTimeout`（75 s，超过单块下载上限），直连上游仍为 15 s。
+  回归测试 `TestSourceCacheChunkOutlivesCancelledReader`：旧代码上游请求 2 次而失败。
+- tvOS：VLC 未到片尾就停止时上报 `.interrupted(position:)` 并保留该位置；`play()` 会先跳回该位置。
+  `PlayerCoordinator` 保存进度后用新的 `fs/get` 地址在该位置重新打开；若距上次恢复不足 10 s 再次停止，
+  显示失败而不无限重试（“Try Again” 会提示从保存的位置继续）。测试
+  `testInterruptionReopensAtStoppedPosition`、`testInterruptionWithoutProgressStopsRetrying`。
+- 部署（2026-10-17）：VM `~/alist-dev-avsync` 的 Go 源与仓库 HEAD 一致，同步本修复后在 ffmpeg 8.1.2 下
+  `go test ./internal/playback/...` 通过，按原参数构建。原二进制 sha256
+  `69906785c0c0384c7e93248662db56804e3c50c6b92f54bfee1817d5ca01d941` 备份于 `/opt/alist/alist.pre-chunkdetach`；
+  当前二进制 sha256 `d9119ad0bf7ec54761d0c6f7b46a3cf87d16d093620352ba92d8e02bc0afc8e5`；`/opt/alist` 中
+  `internal/playback` 源已同步，旧文件备份于 `/opt/alist.source-pre-chunkdetach.tgz`；配置副本
+  `/tmp/config.json.pre-deploy`。重启后服务 started，`/ping`、首页与 `/api/public/settings` 均 200。
+  该集原文件此时已全部缓存，复现需要未缓存的新文件；尚未在 Apple TV 上复测。

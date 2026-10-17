@@ -26,6 +26,10 @@ const (
 	// A transient upstream failure must not fail the whole segment.
 	sourceChunkAttempts = 3
 	sourceChunkBackoff  = 200 * time.Millisecond
+	// ffmpeg's read timeout on the loopback cache. A cold chunk delivers no
+	// bytes until fully downloaded, so this must outlast one chunk fetch: at
+	// 15 s, 32 MiB chunks from a ~2 MB/s upstream failed whole segments.
+	sourceReadTimeout = sourceChunkTimeout + 15*time.Second
 )
 
 var errSourceCacheFull = errors.New("playback source cache is full")
@@ -404,32 +408,41 @@ func (e *sourceEntry) ensureChunk(ctx context.Context, index int64) (string, err
 		_ = os.Remove(path)
 		e.store.discard(e.record, info.Size())
 	}
-	if call := e.calls[index]; call != nil {
-		e.mu.Unlock()
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-call.done:
-			return call.path, call.err
-		}
+	call := e.calls[index]
+	if call == nil {
+		call = &sourceChunkCall{done: make(chan struct{})}
+		e.calls[index] = call
+		e.store.retain(e)
+		// Download detached from this reader. A cold chunk sends ffmpeg no
+		// bytes until it is complete, so a slow upstream can outlast ffmpeg's
+		// read timeout; cancelling the half-fetched chunk with its connection
+		// made every retry restart the same download and fail the same way.
+		// The chunk's own timeout still bounds the fetch.
+		go e.completeChunk(context.WithoutCancel(ctx), index, path, call)
 	}
-	call := &sourceChunkCall{done: make(chan struct{})}
-	e.calls[index] = call
 	e.mu.Unlock()
-
-	call.err = e.fetchChunk(ctx, index, path)
-	if call.err == nil {
-		call.path = path
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-call.done:
+		return call.path, call.err
 	}
+}
+
+func (e *sourceEntry) completeChunk(ctx context.Context, index int64, path string, call *sourceChunkCall) {
+	err := e.fetchChunk(ctx, index, path)
+	// Release before waking readers so a finished entry is already evictable.
+	e.store.release(e)
 
 	e.mu.Lock()
 	delete(e.calls, index)
-	if call.err == nil {
-		e.ready[index] = call.path
+	if err == nil {
+		call.path = path
+		e.ready[index] = path
 	}
+	call.err = err
 	close(call.done)
 	e.mu.Unlock()
-	return call.path, call.err
 }
 func (e *sourceEntry) setSourceURL(sourceURL string) {
 	e.mu.Lock()
