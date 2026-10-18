@@ -20,8 +20,9 @@ final class LibraryScannerTests: XCTestCase {
     }
 
     @discardableResult
-    private func scan(_ mode: LibraryScanner.Mode, recorder: ScanRecorder = ScanRecorder()) async throws -> LibraryScanResult {
-        let scanner = LibraryScanner(api: server, database: database)
+    private func scan(_ mode: LibraryScanner.Mode, excluded: [String] = [], recorder: ScanRecorder = ScanRecorder()) async throws -> LibraryScanResult {
+        var scanner = LibraryScanner(api: server, database: database)
+        scanner.excluded = excluded
         let result = try await scanner.scan(roots: roots, mode: mode, progress: { _ in }, changes: { recorder.record($0) })
         await database.flush()
         return result
@@ -91,6 +92,40 @@ final class LibraryScannerTests: XCTestCase {
         XCTAssertEqual(recorder.upserted["/TV/Dark/Season 1/Dark.S01E03.mkv"]?.parsed.episode, 3)
         let stored = await storedPaths()
         XCTAssertEqual(stored, allVideos.union(["/TV/Dark/Season 1/Dark.S01E03.mkv"]))
+    }
+
+    func testExcludedFolderIsNotListedAndExcludedVideoIsNotIndexed() async throws {
+        let arrival = "/Movies/Arrival (2016)/Arrival.2016.1080p.mkv"
+        let recorder = ScanRecorder()
+        try await scan(.quick, excluded: ["/TV/Dark", arrival], recorder: recorder)
+
+        let listed = await server.listed
+        XCTAssertFalse(listed.contains { $0.hasPrefix("/TV/Dark") }, "Nothing below an excluded folder is listed")
+        XCTAssertEqual(Set(recorder.upserted.keys), ["/Movies/Interstellar (2014)/Interstellar.2014.2160p.mkv"])
+        let stored = await storedPaths()
+        XCTAssertEqual(stored, ["/Movies/Interstellar (2014)/Interstellar.2014.2160p.mkv"])
+    }
+
+    func testExcludingAfterAScanRemovesWhatWasStoredAndIncludingBringsItBack() async throws {
+        let arrival = "/Movies/Arrival (2016)/Arrival.2016.1080p.mkv"
+        try await scan(.quick)
+
+        // The view model makes the folders holding a changed path list again.
+        database.forgetListing(of: "/TV")
+        database.forgetListing(of: "/Movies/Arrival (2016)")
+        let recorder = ScanRecorder()
+        try await scan(.quick, excluded: ["/TV/Dark", arrival], recorder: recorder)
+        XCTAssertEqual(recorder.removed, ["/TV/Dark/Season 1/Dark.S01E01.mkv", "/TV/Dark/Season 1/Dark.S01E02.mkv", arrival])
+        var stored = await storedPaths()
+        XCTAssertEqual(stored, ["/Movies/Interstellar (2014)/Interstellar.2014.2160p.mkv"])
+
+        database.forgetListing(of: "/TV")
+        database.forgetListing(of: "/Movies/Arrival (2016)")
+        let restored = ScanRecorder()
+        try await scan(.quick, recorder: restored)
+        XCTAssertEqual(Set(restored.upserted.keys), allVideos.subtracting(["/Movies/Interstellar (2014)/Interstellar.2014.2160p.mkv"]))
+        stored = await storedPaths()
+        XCTAssertEqual(stored, allVideos)
     }
 
     func testDeletedFolderRemovesItsVideos() async throws {

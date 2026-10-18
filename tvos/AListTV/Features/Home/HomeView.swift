@@ -118,7 +118,7 @@ struct HomeView: View {
         case let .title(title, focusPath):
             GalleryDetailView(viewModel: gallery, title: title, focusPath: focusPath, onReveal: reveal)
         case let .collection(collection):
-            GalleryCollectionView(viewModel: gallery, collection: collection)
+            GalleryCollectionView(viewModel: gallery, collection: collection, onReveal: reveal)
         }
     }
 

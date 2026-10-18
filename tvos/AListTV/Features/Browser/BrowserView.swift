@@ -187,7 +187,7 @@ struct BrowserView: View {
                         BrowserCard(item: item)
                     }
                     .buttonStyle(TileButtonStyle())
-                    .galleryFolderMenu(item, gallery: gallery)
+                    .galleryMenu(item, gallery: gallery)
                     .focused($focusedPath, equals: item.virtualPath)
                     .accessibilityIdentifier("browser.item.\(item.virtualPath ?? item.name)")
                     .accessibilityValue(focusedPath == item.virtualPath ? "focused" : "")
@@ -212,7 +212,7 @@ struct BrowserView: View {
                         BrowserListRow(item: item)
                     }
                     .buttonStyle(RowButtonStyle(cornerRadius: 22))
-                    .galleryFolderMenu(item, gallery: gallery)
+                    .galleryMenu(item, gallery: gallery)
                     .focused($focusedPath, equals: item.virtualPath)
                     .accessibilityIdentifier("browser.item.\(item.virtualPath ?? item.name)")
                     .accessibilityValue(focusedPath == item.virtualPath ? "focused" : "")
@@ -332,28 +332,41 @@ struct BrowserView: View {
 
 private extension View {
     @ViewBuilder
-    func galleryFolderMenu(_ item: AListObject, gallery: GalleryViewModel?) -> some View {
-        if let gallery, item.isDirectory, let path = item.virtualPath {
-            contextMenu { GalleryFolderMenuItem(gallery: gallery, path: path) }
+    func galleryMenu(_ item: AListObject, gallery: GalleryViewModel?) -> some View {
+        if let gallery, item.isDirectory || LibraryScanner.isVideo(item), let path = item.virtualPath {
+            contextMenu { GalleryMenuItems(gallery: gallery, path: path, isFolder: item.isDirectory) }
         } else {
             self
         }
     }
 }
 
-/// Observes the Gallery so the menu always reflects the current folder list.
-private struct GalleryFolderMenuItem: View {
+/// Observes the Gallery so the menu always reflects the current folder and
+/// exclusion lists.
+private struct GalleryMenuItems: View {
     @ObservedObject var gallery: GalleryViewModel
     let path: String
+    let isFolder: Bool
 
     var body: some View {
-        if gallery.isRoot(path) {
-            Button { gallery.toggleRoot(path) } label: {
-                Label("Remove from Gallery", systemImage: "minus.circle")
+        if isFolder {
+            if gallery.isRoot(path) {
+                Button { gallery.toggleRoot(path) } label: {
+                    Label("Remove from Gallery", systemImage: "minus.circle")
+                }
+            } else if !gallery.isExcluded(path) {
+                Button { gallery.toggleRoot(path) } label: {
+                    Label("Add to Gallery", systemImage: "film.stack")
+                }
             }
-        } else {
-            Button { gallery.toggleRoot(path) } label: {
-                Label("Add to Gallery", systemImage: "film.stack")
+        }
+        if gallery.isExclusion(path) {
+            Button { gallery.include(path) } label: {
+                Label("Include in Gallery", systemImage: "eye")
+            }
+        } else if gallery.canExclude(path) {
+            Button { gallery.exclude([path]) } label: {
+                Label("Exclude from Gallery", systemImage: "eye.slash")
             }
         }
     }

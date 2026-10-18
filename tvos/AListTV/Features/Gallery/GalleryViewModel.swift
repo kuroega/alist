@@ -72,6 +72,8 @@ final class GalleryViewModel: ObservableObject {
     @Published private(set) var watch = GalleryWatchState()
     @Published private(set) var genreNames: [Int: String] = [:]
     @Published private(set) var roots: [String]
+    /// Folders and videos inside the library folders kept out of the Gallery.
+    @Published private(set) var excluded: [String]
     @Published private(set) var lastScan: Date?
     @Published private(set) var matchProgress: (done: Int, total: Int)?
     @Published private(set) var metadataIssue: String?
@@ -157,6 +159,7 @@ final class GalleryViewModel: ObservableObject {
         self.onPlay = onPlay
         self.onUnauthorized = onUnauthorized
         roots = store.roots
+        excluded = store.excluded
     }
 
     deinit {
@@ -193,8 +196,7 @@ final class GalleryViewModel: ObservableObject {
             let storedMatches = await database.loadMatches(language: language)
             let state = await database.loadScanState()
             guard let self, !Task.isCancelled else { return }
-            let roots = self.roots
-            for file in storedFiles where LibraryScanner.isInside(file.path, roots: roots) {
+            for file in storedFiles where self.belongsInLibrary(file.path) {
                 self.files[file.path] = file
             }
             self.scanState = state
@@ -242,7 +244,8 @@ final class GalleryViewModel: ObservableObject {
         scanGeneration += 1
         let generation = scanGeneration
         let roots = roots
-        let scanner = LibraryScanner(api: api, database: database)
+        var scanner = LibraryScanner(api: api, database: database)
+        scanner.excluded = excluded
         libraryIssue = nil
         phase = .scanning(LibraryScanProgress(foldersScanned: 0, videosFound: 0, currentFolder: roots.first ?? "/"))
         let progress: @Sendable (LibraryScanProgress) async -> Void = { [weak self] progress in
@@ -277,9 +280,8 @@ final class GalleryViewModel: ObservableObject {
 
     private func resync(_ stored: [LibraryFile], generation: Int) {
         guard scanGeneration == generation else { return }
-        let roots = roots
         var fresh: [String: LibraryFile] = [:]
-        for file in stored where LibraryScanner.isInside(file.path, roots: roots) { fresh[file.path] = file }
+        for file in stored where belongsInLibrary(file.path) { fresh[file.path] = file }
         guard fresh != files else { return }
         files = fresh
         enqueueMatches(for: files.values)
@@ -419,12 +421,89 @@ final class GalleryViewModel: ObservableObject {
     private func setRoots(_ newRoots: [String]) {
         store.setRoots(newRoots)
         roots = store.roots
+        // An exclusion only means something strictly inside a library folder;
+        // a folder added on purpose wins over an exclusion above it.
+        let minimal = LibraryScanner.minimalRoots(roots)
+        let kept = excluded.filter { path in
+            minimal.contains { Self.isStrictlyInside(path, root: $0) } && !minimal.contains { LibraryScanner.isExcluded($0, by: [path]) }
+        }
+        if kept != excluded {
+            store.setExcluded(kept)
+            excluded = store.excluded
+        }
         // Videos outside the folders leave at once; new ones arrive as the
         // scan finds them, reusing every folder already in the store.
-        let roots = roots
-        files = files.filter { LibraryScanner.isInside($0.key, roots: roots) }
-        rebuildCatalog()
+        dropFilesOutsideLibrary()
         requestScan(.quick)
+    }
+
+    // MARK: Exclusions
+
+    /// Whether `path` is kept out of the Gallery, itself or through a folder above it.
+    func isExcluded(_ path: String) -> Bool {
+        LibraryScanner.isExcluded(AListPath.normalize(path), by: excluded)
+    }
+
+    /// Whether `path` itself is on the excluded list (and so can be included again).
+    func isExclusion(_ path: String) -> Bool { excluded.contains(AListPath.normalize(path)) }
+
+    /// Only what lies inside a library folder, and is not one, can be excluded.
+    func canExclude(_ path: String) -> Bool {
+        let path = AListPath.normalize(path)
+        return !isExcluded(path) && LibraryScanner.minimalRoots(roots).contains { Self.isStrictlyInside(path, root: $0) }
+    }
+
+    /// Keeps folders or videos out of the Gallery: they leave the shelves at
+    /// once, are not looked up on TMDB, and leave the index on the next update.
+    func exclude(_ paths: [String]) {
+        let added = Set(paths.map(AListPath.normalize).filter(canExclude))
+        guard !added.isEmpty else { return }
+        // Exclusions inside a newly excluded folder are now redundant.
+        let kept = excluded.filter { !LibraryScanner.isExcluded($0, by: Array(added)) }
+        setExcluded(kept + added, changed: Array(added))
+    }
+
+    func include(_ path: String) {
+        let path = AListPath.normalize(path)
+        guard isExclusion(path) else { return }
+        setExcluded(excluded.filter { $0 != path }, changed: [path])
+    }
+
+    /// The folder holding every video of `title`, when it can be excluded on its own.
+    func excludableFolder(for title: GalleryTitle) -> String? {
+        let paths = paths(for: title)
+        guard let first = paths.first else { return nil }
+        var folder = AListPath.parent(of: first)
+        for path in paths.dropFirst() {
+            while folder != "/", !path.hasPrefix(folder + "/") { folder = AListPath.parent(of: folder) }
+        }
+        return canExclude(folder) ? folder : nil
+    }
+
+    private func setExcluded(_ paths: [String], changed: [String]) {
+        store.setExcluded(paths)
+        excluded = store.excluded
+        // The folders holding them are listed again on the next update, so
+        // what was excluded leaves the index and what was included returns.
+        for folder in Set(changed.map(AListPath.parent(of:))) { database.forgetListing(of: folder) }
+        dropFilesOutsideLibrary()
+        requestScan(.quick)
+    }
+
+    private func belongsInLibrary(_ path: String) -> Bool {
+        LibraryScanner.isInside(path, roots: roots) && !LibraryScanner.isExcluded(path, by: excluded)
+    }
+
+    private func dropFilesOutsideLibrary() {
+        files = files.filter { belongsInLibrary($0.key) }
+        let keys = Set(files.values.map { GalleryMatchKey.key(for: $0.parsed) })
+        matchQueue = matchQueue.filter { keys.contains($0.key) }
+        updateMatchProgress()
+        rebuildCatalog()
+    }
+
+    private static func isStrictlyInside(_ path: String, root: String) -> Bool {
+        path != root && (root == "/" || path.hasPrefix(root + "/"))
     }
 
     // MARK: Watch state

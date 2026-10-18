@@ -209,25 +209,8 @@ struct GalleryView: View {
         }
     }
 
-    @ViewBuilder
     private func menu(for title: GalleryTitle, playing path: String?, section: GalleryPlayEntry.Section? = nil) -> some View {
-        let file = path.flatMap { path in viewModel.catalog.episode(forPath: path)?.episode.file }
-            ?? viewModel.primaryFile(for: title)
-        if let file {
-            Button { viewModel.play(file) } label: { Label("Play", systemImage: "play.fill") }
-        }
-        let paths = viewModel.paths(for: title)
-        if paths.allSatisfy({ viewModel.watch.isWatched($0) }) {
-            Button { viewModel.setWatched(false, paths: paths) } label: { Label("Mark as Unwatched", systemImage: "circle") }
-        } else {
-            Button { viewModel.setWatched(true, paths: paths) } label: { Label("Mark as Watched", systemImage: "checkmark.circle") }
-        }
-        if section == .watching {
-            Button(role: .destructive) { viewModel.removeFromWatching(title) } label: { Label("Remove from Watching", systemImage: "minus.circle") }
-        }
-        if let file {
-            Button { onReveal(file.object) } label: { Label("Show in Browse", systemImage: "folder") }
-        }
+        GalleryTitleMenu(viewModel: viewModel, title: title, path: path, section: section, onReveal: onReveal)
     }
 
     // MARK: States
@@ -740,6 +723,47 @@ private struct GalleryScanningView: View {
         .accessibilityIdentifier("gallery.scanning")
         .onAppear {
             withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) { pulse = true }
+        }
+    }
+}
+
+/// Long-press actions for a title's card, on the shelves and the "See All" walls.
+struct GalleryTitleMenu: View {
+    let viewModel: GalleryViewModel
+    let title: GalleryTitle
+    /// The file the card stands for (a Watching card's episode), if any.
+    var path: String?
+    var section: GalleryPlayEntry.Section?
+    let onReveal: (AListObject) -> Void
+
+    var body: some View {
+        let file = path.flatMap { path in viewModel.catalog.episode(forPath: path)?.episode.file }
+            ?? viewModel.primaryFile(for: title)
+        if let file {
+            Button { viewModel.play(file) } label: { Label("Play", systemImage: "play.fill") }
+        }
+        let paths = viewModel.paths(for: title)
+        if paths.allSatisfy({ viewModel.watch.isWatched($0) }) {
+            Button { viewModel.setWatched(false, paths: paths) } label: { Label("Mark as Unwatched", systemImage: "circle") }
+        } else {
+            Button { viewModel.setWatched(true, paths: paths) } label: { Label("Mark as Watched", systemImage: "checkmark.circle") }
+        }
+        if section == .watching {
+            Button(role: .destructive) { viewModel.removeFromWatching(title) } label: { Label("Remove from Watching", systemImage: "minus.circle") }
+        }
+        if let file {
+            Button { onReveal(file.object) } label: { Label("Show in Browse", systemImage: "folder") }
+        }
+        let excludable = paths.filter(viewModel.canExclude)
+        if !excludable.isEmpty {
+            Button(role: .destructive) { viewModel.exclude(excludable) } label: {
+                Label(excludable.count == 1 ? "Exclude Video" : "Exclude \(excludable.count) Videos", systemImage: "eye.slash")
+            }
+        }
+        if let folder = viewModel.excludableFolder(for: title) {
+            Button(role: .destructive) { viewModel.exclude([folder]) } label: {
+                Label("Exclude Folder “\(folder.split(separator: "/").last ?? "")”", systemImage: "folder.badge.minus")
+            }
         }
     }
 }

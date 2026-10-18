@@ -294,6 +294,14 @@ final class GalleryDatabase: @unchecked Sendable {
         }
     }
 
+    /// Makes the next scan list `folder` again instead of reusing its stored
+    /// contents, e.g. after something inside it was excluded or included.
+    func forgetListing(of folder: String) {
+        write { connection in
+            try connection.run("UPDATE folders SET listed_at = NULL WHERE path = ?", [.text(folder)])
+        }
+    }
+
     /// Marks folders whose stored contents are still current, so the end of
     /// the pass keeps them.
     func markSeen(_ paths: [String], scanID: Int64) {

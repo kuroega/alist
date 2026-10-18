@@ -59,7 +59,8 @@ struct LibraryScanResult: Equatable, Sendable {
 }
 
 /// Walks the server breadth-first from the library folders and keeps the
-/// Gallery store in step with it, skipping extras, samples and system folders.
+/// Gallery store in step with it, skipping extras, samples, system folders
+/// and anything the viewer excluded.
 ///
 /// The walk is incremental. Every listing is saved as it arrives, so an
 /// interrupted scan keeps its progress. In `.quick` mode a folder without
@@ -76,6 +77,8 @@ struct LibraryScanner: Sendable {
 
     let api: any AListAPI
     let database: GalleryDatabase
+    /// Folders and videos left out of the Gallery, with everything below them.
+    var excluded: [String] = []
     var maxDepth = 12
     var maxFolders = 40_000
     var concurrency = 4
@@ -121,7 +124,9 @@ struct LibraryScanner: Sendable {
             for file in files { known[file.path] = file }
         }
 
-        var queue = Self.minimalRoots(roots).map { Pending(path: $0, depth: 0, reported: nil, parent: nil) }
+        let excluded = excluded
+        let isExcluded = { (path: String) in Self.isExcluded(path, by: excluded) }
+        var queue = Self.minimalRoots(roots).filter { !isExcluded($0) }.map { Pending(path: $0, depth: 0, reported: nil, parent: nil) }
         var head = 0
         var visited = Set<String>()
         /// Videos confirmed present during this pass.
@@ -149,7 +154,7 @@ struct LibraryScanner: Sendable {
             let inside = { (path: String) in path == folder || path.hasPrefix(prefix) }
             seen += folders.keys.filter(inside)
             for (key, files) in baseline.filesByFolder where inside(key) {
-                for file in files { live.insert(file.path) }
+                for file in files where !isExcluded(file.path) { live.insert(file.path) }
             }
         }
 
@@ -163,7 +168,7 @@ struct LibraryScanner: Sendable {
                     if mode == .quick, canReuse(next, folders: folders, children: children) {
                         result.foldersReused += 1
                         seen.append(next.path)
-                        for file in baseline.filesByFolder[next.path] ?? [] { live.insert(file.path) }
+                        for file in baseline.filesByFolder[next.path] ?? [] where !isExcluded(file.path) { live.insert(file.path) }
                         continue
                     }
                     running += 1
@@ -191,6 +196,7 @@ struct LibraryScanner: Sendable {
                     var videos: [String: LibraryFile] = [:]
                     for item in items {
                         let path = Self.childPath(of: item, in: folder.path)
+                        if isExcluded(path) { continue }
                         if item.isDirectory {
                             if folder.depth + 1 <= maxDepth, !Self.isSkippedFolder(item.name), subfolderPaths.insert(path).inserted {
                                 subfolders.append(Pending(path: path, depth: folder.depth + 1, reported: item.modified, parent: folder.path))
@@ -316,6 +322,11 @@ struct LibraryScanner: Sendable {
         minimalRoots(roots).contains { root in root == "/" || path == root || path.hasPrefix(root + "/") }
     }
 
+    /// Whether `path` is one of `excluded` or lies inside one of them.
+    static func isExcluded(_ path: String, by excluded: [String]) -> Bool {
+        excluded.contains { path == $0 || path.hasPrefix($0 == "/" ? "/" : $0 + "/") }
+    }
+
     static func isVideo(_ item: AListObject) -> Bool {
         guard !item.isDirectory else { return false }
         if item.fileType == .video { return true }
@@ -343,6 +354,7 @@ struct LibraryScanner: Sendable {
 /// user defaults, and the index itself in a `GalleryDatabase` under Caches.
 struct GalleryLibraryStore {
     static let rootsDefaultsKey = "com.alist.tv.gallery-roots-v1"
+    static let excludedDefaultsKey = "com.alist.tv.gallery-excluded-v1"
     static let englishMetadataDefaultsKey = "com.alist.tv.gallery-english-metadata"
 
     let accountKey: String
@@ -371,6 +383,17 @@ struct GalleryLibraryStore {
         var all = defaults.dictionary(forKey: Self.rootsDefaultsKey) ?? [:]
         all[accountKey] = Array(Set(roots.map(AListPath.normalize))).sorted()
         defaults.set(all, forKey: Self.rootsDefaultsKey)
+    }
+
+    /// Folders and videos inside the library folders kept out of the Gallery.
+    var excluded: [String] {
+        (defaults.dictionary(forKey: Self.excludedDefaultsKey)?[accountKey] as? [String]) ?? []
+    }
+
+    func setExcluded(_ excluded: [String]) {
+        var all = defaults.dictionary(forKey: Self.excludedDefaultsKey) ?? [:]
+        all[accountKey] = Array(Set(excluded.map(AListPath.normalize))).sorted()
+        defaults.set(all, forKey: Self.excludedDefaultsKey)
     }
 
     /// Matches carry the language they were fetched in, so they live per language.

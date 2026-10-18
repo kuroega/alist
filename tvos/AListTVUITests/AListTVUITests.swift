@@ -112,6 +112,61 @@ final class AListTVUITests: XCTestCase {
         attachScreenshot(named: "gallery-settings")
     }
 
+    func testLongPressExcludesFromGalleryAndSettingsIncludesAgain() {
+        login(username: "alice")
+        // The fixture has no library folders, so the whole server is the library.
+        let folder = app.buttons["browser.item./Shows"]
+        focus(folder, direction: .right)
+        remote.press(.select, forDuration: 1.5)
+        XCTAssertTrue(menuItem("Exclude from Gallery").waitForExistence(timeout: 3))
+        XCTAssertTrue(menuItem("Add to Gallery").exists)
+        attachScreenshot(named: "browse-folder-menu")
+        remote.press(.menu)
+
+        let video = app.buttons["browser.item./Sample.mp4"]
+        focus(video, direction: .right)
+        remote.press(.select, forDuration: 1.5)
+        XCTAssertTrue(menuItem("Exclude from Gallery").waitForExistence(timeout: 3))
+        attachScreenshot(named: "browse-video-menu")
+        remote.press(.menu)
+
+        focusSpatially(app.buttons["home.mode.gallery"])
+        remote.press(.select)
+        XCTAssertTrue(app.staticTexts["Un-indexed"].waitForExistence(timeout: 5))
+        let card = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'gallery.title.' AND hasFocus == true")).firstMatch
+        for _ in 0..<6 where !card.exists {
+            remote.press(.down)
+            Thread.sleep(forTimeInterval: 0.3)
+        }
+        XCTAssertTrue(card.exists, "Focus should reach a Gallery card")
+        // Step to the show whose episodes share the Shows folder.
+        let showCard = app.buttons["gallery.title.Shows"]
+        if showCard.exists { focusSpatially(showCard) }
+        remote.press(.select, forDuration: 1.5)
+        let excludeFolder = menuItem("Exclude Folder “Shows”")
+        XCTAssertTrue(excludeFolder.waitForExistence(timeout: 3), app.debugDescription)
+        attachScreenshot(named: "gallery-card-menu")
+        for _ in 0..<12 where !excludeFolder.hasFocus {
+            remote.press(.down)
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        remote.press(.select)
+
+        // The fixture's only Gallery videos are in Shows, so the empty state's button opens settings.
+        let settings = app.buttons["Library Settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        focusSpatially(settings)
+        remote.press(.select)
+        XCTAssertTrue(app.staticTexts["EXCLUDED"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["/Shows"].exists)
+        attachScreenshot(named: "gallery-settings-excluded")
+    }
+
+    /// tvOS exposes context menu actions as plain elements, not buttons.
+    private func menuItem(_ label: String) -> XCUIElement {
+        app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", label)).firstMatch
+    }
+
     func testModeSwitchKeepsBrowseFolder() {
         login(username: "alice")
         focusAndSelect(app.buttons["browser.item./Shows"], direction: .right)

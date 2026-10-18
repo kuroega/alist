@@ -111,6 +111,60 @@ final class GalleryViewModelTests: XCTestCase {
         XCTAssertEqual(stored.count, 2)
     }
 
+    func testExcludingDropsVideosAtOnceAndIncludingBringsThemBack() async throws {
+        let server = FakeLibraryServer()
+        await GalleryFixtures.populate(server)
+        let store = GalleryLibraryStore(baseURL: baseURL, username: "alice", defaults: defaults, directory: directory)
+        store.setRoots(["/Movies", "/TV"])
+        let viewModel = makeViewModel(server: server, store: store, progress: PlaybackProgressStore(defaults: defaults))
+        viewModel.onAppear()
+        await waitUntil { viewModel.phase == .ready && viewModel.catalog.videoCount == 4 }
+
+        viewModel.exclude(["/TV/Dark"])
+        XCTAssertEqual(viewModel.catalog.videoCount, 2)
+        XCTAssertTrue(viewModel.isExcluded("/TV/Dark/Season 1/Dark.S01E01.mkv"))
+        await waitUntil { viewModel.phase == .ready }
+        await store.database.flush()
+        var stored = await store.database.loadFiles()
+        XCTAssertEqual(stored.count, 2, "The next update drops excluded videos from the index")
+        XCTAssertEqual(store.excluded, ["/TV/Dark"])
+
+        viewModel.include("/TV/Dark")
+        await waitUntil { viewModel.phase == .ready && viewModel.catalog.videoCount == 4 }
+        await store.database.flush()
+        stored = await store.database.loadFiles()
+        XCTAssertEqual(stored.count, 4)
+        XCTAssertTrue(viewModel.excluded.isEmpty)
+    }
+
+    func testOnlyPathsInsideLibraryFoldersCanBeExcluded() async throws {
+        let server = FakeLibraryServer()
+        await GalleryFixtures.populate(server)
+        let store = GalleryLibraryStore(baseURL: baseURL, username: "alice", defaults: defaults, directory: directory)
+        store.setRoots(["/Movies", "/TV"])
+        let viewModel = makeViewModel(server: server, store: store, progress: PlaybackProgressStore(defaults: defaults))
+        viewModel.onAppear()
+        await waitUntil { viewModel.phase == .ready && viewModel.catalog.videoCount == 4 }
+
+        XCTAssertFalse(viewModel.canExclude("/Movies"), "A library folder is removed, not excluded")
+        XCTAssertFalse(viewModel.canExclude("/Music"))
+        XCTAssertTrue(viewModel.canExclude("/Movies/Arrival (2016)"))
+        let interstellar = try XCTUnwrap(viewModel.catalog.title(forPath: "/Movies/Interstellar (2014)/Interstellar.2014.2160p.mkv"))
+        XCTAssertEqual(viewModel.excludableFolder(for: interstellar), "/Movies/Interstellar (2014)")
+        let dark = try XCTUnwrap(viewModel.catalog.title(forPath: "/TV/Dark/Season 1/Dark.S01E01.mkv"))
+        XCTAssertEqual(viewModel.excludableFolder(for: dark), "/TV/Dark/Season 1")
+
+        viewModel.exclude(["/TV/Dark/Season 1/Dark.S01E01.mkv"])
+        viewModel.exclude(["/TV/Dark"])
+        XCTAssertEqual(viewModel.excluded, ["/TV/Dark"], "An exclusion inside a newly excluded folder is dropped")
+        XCTAssertFalse(viewModel.canExclude("/TV/Dark/Season 1"), "Already excluded through its parent")
+        XCTAssertFalse(viewModel.isExclusion("/TV/Dark/Season 1"))
+
+        viewModel.removeRoot("/TV")
+        XCTAssertTrue(viewModel.excluded.isEmpty, "Exclusions outside every library folder are forgotten")
+        await waitUntil { viewModel.phase == .ready }
+    }
+
     func testRemovingATitleFromWatchingClearsOnlyItsResumePoints() async throws {
         let server = FakeLibraryServer()
         await GalleryFixtures.populate(server)

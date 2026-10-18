@@ -4,6 +4,7 @@ import SwiftUI
 struct GalleryCollectionView: View {
     @ObservedObject var viewModel: GalleryViewModel
     let collection: GalleryCollection
+    let onReveal: (AListObject) -> Void
 
     private let columns = Array(repeating: GridItem(.fixed(206), spacing: 44, alignment: .top), count: 7)
 
@@ -37,6 +38,7 @@ struct GalleryCollectionView: View {
                                     PosterCardLabel(info: info, width: 206) { viewModel.focus(title) }
                                 }
                                 .buttonStyle(.borderless)
+                                .contextMenu { GalleryTitleMenu(viewModel: viewModel, title: title, onReveal: onReveal) }
                                 .accessibilityIdentifier("gallery.collection.\(info.title)")
                             }
                         }
@@ -93,10 +95,24 @@ struct GallerySettingsView: View {
                         .buttonStyle(RowButtonStyle(cornerRadius: 22))
                     }
                 }
-                Text("To pick folders, press and hold a folder in Browse and choose Add to Gallery. Updates list only folders that changed; Rescan All lists every one.")
+                Text("To pick folders, press and hold a folder in Browse and choose Add to Gallery. To leave a folder or video out, press and hold it and choose Exclude. Updates list only folders that changed; Rescan All lists every one.")
                     .font(.system(size: 21))
                     .foregroundStyle(Theme.tertiaryText)
                     .padding(.horizontal, 24)
+            }
+
+            if !viewModel.excluded.isEmpty {
+                VStack(alignment: .leading, spacing: 14) {
+                    sectionLabel("EXCLUDED")
+                    ForEach(viewModel.excluded, id: \.self) { path in
+                        Button {
+                            viewModel.include(path)
+                        } label: {
+                            row(icon: "eye.slash", title: path, detail: "Select to include in the Gallery again", trailing: "plus.circle")
+                        }
+                        .buttonStyle(RowButtonStyle(cornerRadius: 22))
+                    }
+                }
             }
 
             VStack(alignment: .leading, spacing: 14) {
