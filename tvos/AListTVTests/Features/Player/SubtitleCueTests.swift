@@ -15,4 +15,18 @@ final class SubtitleCueTests: XCTestCase {
         let cues = try SubtitleCueParser.parse(data: Data(source.utf8), fileName: "sample.ass")
         XCTAssertEqual(cues.map(\.text), ["Hello,\nworld"])
     }
+
+    @MainActor
+    func testOverlayOffsetShiftsCuesAtTheCurrentTime() {
+        let overlay = SubtitleOverlayModel()
+        overlay.install([SubtitleCue(start: 10, end: 12, text: "Hello")])
+        overlay.update(time: 12.5)
+        XCTAssertNil(overlay.activeText)
+
+        overlay.setOffset(1)
+        XCTAssertEqual(overlay.activeText, "Hello", "a later offset re-evaluates without waiting for the next tick")
+
+        overlay.update(time: 10.5)
+        XCTAssertNil(overlay.activeText, "the cue now starts at 11s")
+    }
 }

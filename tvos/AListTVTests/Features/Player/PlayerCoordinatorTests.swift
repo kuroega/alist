@@ -535,6 +535,64 @@ final class PlayerCoordinatorTests: XCTestCase {
         XCTAssertTrue(coordinator.subtitleOverlay.cues.isEmpty, "the previous file's subtitles must not draw over the next")
     }
 
+    func testSubtitleOffsetShiftsTheExternalSubtitleUntilAnotherIsChosen() async throws {
+        let api = PlayerFakeAPI(
+            details: [
+                detail(url: "https://media.example/Movie.mp4", path: "/Movie.mp4"),
+                detail(url: "https://media.example/Movie.en.srt", path: "/Movie.en.srt")
+            ],
+            listPages: [[AListObject(virtualPath: "/Movie.en.srt", name: "Movie.en.srt", isDirectory: false)]]
+        )
+        let player = PlayerFakeController()
+        let coordinator = makeCoordinator(api: api, player: player)
+
+        await coordinator.play(object: object("/Movie.mp4"))
+        try await waitUntil { coordinator.subtitleSelection == .external(fileID: "/Movie.en.srt") }
+        coordinator.subtitleOverlay.update(time: 39.5)
+        XCTAssertNil(coordinator.subtitleOverlay.activeText)
+
+        coordinator.adjustSubtitleOffset(by: -1)
+        for _ in 0..<3 { coordinator.adjustSubtitleOffset(by: 0.1) }
+
+        XCTAssertEqual(coordinator.subtitleOffset, -0.7, "steps land on exact tenths")
+        XCTAssertEqual(coordinator.subtitleOverlay.activeText, "Native SRT subtitle", "the cue at 40s now shows at 39.3s")
+        XCTAssertEqual(player.subtitleDelay, -0.7)
+
+        await coordinator.selectSubtitle(.off)
+
+        XCTAssertEqual(coordinator.subtitleOffset, 0)
+        XCTAssertEqual(coordinator.subtitleOverlay.offset, 0)
+        XCTAssertEqual(player.subtitleDelay, 0)
+    }
+
+    func testSubtitleOffsetNeedsAnExternalSubtitleAndIsClamped() async throws {
+        let api = PlayerFakeAPI(
+            details: [
+                detail(url: "https://media.example/Feature.mp4", path: "/Feature.mp4"),
+                detail(url: "https://media.example/Movie.en.srt", path: "/Movie.en.srt")
+            ],
+            listPages: [[AListObject(virtualPath: "/Movie.en.srt", name: "Movie.en.srt", isDirectory: false)]]
+        )
+        let player = PlayerFakeController()
+        let coordinator = makeCoordinator(api: api, player: player)
+        await coordinator.play(object: object("/Feature.mp4"))
+        try await waitUntil { coordinator.externalSubtitleDiscoveryState == .loaded }
+
+        coordinator.adjustSubtitleOffset(by: 1)
+        XCTAssertEqual(coordinator.subtitleOffset, 0, "embedded and absent subtitles keep their timing")
+
+        await coordinator.selectSubtitle(.external(fileID: "/Movie.en.srt"))
+        coordinator.adjustSubtitleOffset(by: 10_000)
+        XCTAssertEqual(coordinator.subtitleOffset, PlayerCoordinator.subtitleOffsetLimit)
+
+        await coordinator.selectSubtitle(.external(fileID: "/Movie.en.srt"))
+        XCTAssertEqual(coordinator.subtitleOffset, PlayerCoordinator.subtitleOffsetLimit, "reselecting the same file keeps its offset")
+
+        coordinator.resetSubtitleOffset()
+        XCTAssertEqual(coordinator.subtitleOffset, 0)
+        XCTAssertEqual(player.subtitleDelay, 0)
+    }
+
     func testExternalSubtitleSelectionResolvesSecureURL() async throws {
         let api = PlayerFakeAPI(
             details: [
@@ -990,6 +1048,8 @@ private final class PlayerFakeController: PlayerControlling {
         return selectLoadedExternalSubtitle(id: id)
     }
     func setSubtitleAppearance(_ appearance: SubtitleAppearance) { subtitleAppearance = appearance }
+    private(set) var subtitleDelay: TimeInterval = 0
+    func setSubtitleDelay(_ seconds: TimeInterval) { subtitleDelay = seconds }
     func setDiagnosticsEnabled(_ enabled: Bool) {}
     func emit(_ event: PlayerEvent) { continuation.yield(event) }
 }

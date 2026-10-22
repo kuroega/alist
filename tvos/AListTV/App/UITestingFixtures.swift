@@ -138,6 +138,7 @@ final class FixturePlayerController: ObservableObject, PlayerControlling {
     func selectLoadedExternalSubtitle(id: String) -> Bool { guard loadedExternalIDs.contains(id) else { return false }; selectedExternalSubtitleID = id; embeddedSubtitleTracks = embeddedSubtitleTracks.map { PlaybackTrackOption(id: $0.id, title: $0.title, languageCode: $0.languageCode, codec: $0.codec, isSelected: false) }; return true }
     func addExternalSubtitle(url: URL, id: String, title: String) -> Bool { if shouldFailExternalSubtitleAdd { return false }; loadedExternalIDs.insert(id); return selectLoadedExternalSubtitle(id: id) }
     func setSubtitleAppearance(_ appearance: SubtitleAppearance) { subtitleAppearance = appearance }
+    func setSubtitleDelay(_ seconds: TimeInterval) {}
     func setDiagnosticsEnabled(_ enabled: Bool) {
         diagnostics = enabled ? PlaybackDiagnosticsSnapshot(engine: .vlc, currentTime: currentTime, duration: duration, isPlaying: isPlaying, isSeekable: isSeekable, inputBytesRead: 1_024_000, inputBitrate: 125_000, demuxBytesRead: 1_000_000, demuxBitrate: 120_000, demuxCorrupted: 0, demuxDiscontinuity: 0, decodedVideo: 300, decodedAudio: 500, displayedPictures: 298, latePictures: 1, lostPictures: 1, playedAudioBuffers: 500, lostAudioBuffers: 0, videoResolution: "1920×1080", videoFrameRate: 24, videoCodec: "H.264", audioTitle: "English", audioLanguageCode: "en", audioCodec: "AAC", subtitleTitle: "English", subtitleLanguageCode: "en", subtitleCodec: "WebVTT") : nil
     }

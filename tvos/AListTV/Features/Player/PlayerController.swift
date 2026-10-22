@@ -182,6 +182,8 @@ protocol PlayerControlling: AnyObject {
     func selectLoadedExternalSubtitle(id: String) -> Bool
     func addExternalSubtitle(url: URL, id: String, title: String) -> Bool
     func setSubtitleAppearance(_ appearance: SubtitleAppearance)
+    /// Shifts subtitles the player draws itself; positive values show them later.
+    func setSubtitleDelay(_ seconds: TimeInterval)
     func setDiagnosticsEnabled(_ enabled: Bool)
 }
 

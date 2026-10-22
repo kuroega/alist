@@ -120,6 +120,8 @@ final class NativePlayerControllerAdapter: NSObject, ObservableObject, PlayerCon
     // Only overlay-rendered formats (SRT/ASS) are supported on this player.
     func addExternalSubtitle(url: URL, id: String, title: String) -> Bool { false }
     func setSubtitleAppearance(_ appearance: SubtitleAppearance) { subtitleAppearance = appearance }
+    // External files draw in the overlay, which applies the offset itself.
+    func setSubtitleDelay(_ seconds: TimeInterval) {}
 
     func setDiagnosticsEnabled(_ enabled: Bool) {
         diagnosticsEnabled = enabled

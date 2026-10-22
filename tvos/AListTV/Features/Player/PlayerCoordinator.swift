@@ -28,7 +28,16 @@ final class PlayerCoordinator: ObservableObject {
     @Published private(set) var externalSubtitles: [ExternalSubtitleOption] = []
     @Published private(set) var externalSubtitleDiscoveryState: ExternalSubtitleDiscoveryState = .idle
     @Published var subtitleSelectionError: String?
-    @Published private(set) var subtitleSelection: SubtitleSelection = .off
+    @Published private(set) var subtitleSelection: SubtitleSelection = .off {
+        // An offset is tuned for one subtitle file; another choice starts in sync.
+        didSet {
+            guard subtitleSelection != oldValue else { return }
+            subtitleOffset = 0
+            applySubtitleOffset()
+        }
+    }
+    /// How much later than its file times the external subtitle is shown.
+    @Published private(set) var subtitleOffset: TimeInterval = 0
     @Published private(set) var subtitleAppearance: SubtitleAppearance
     @Published private(set) var resumePrompt: PlaybackResumePrompt?
     @Published var isAutoPlayEnabled: Bool {
@@ -350,6 +359,30 @@ final class PlayerCoordinator: ObservableObject {
                 }
             }
             await subtitleSelectionTask?.value
+        }
+    }
+
+    static let subtitleOffsetLimit: TimeInterval = 600
+
+    /// Shifts the selected external subtitle, in tenths of a second.
+    func adjustSubtitleOffset(by delta: TimeInterval) {
+        guard case .external = subtitleSelection else { return }
+        let offset = ((subtitleOffset + delta) * 10).rounded() / 10
+        subtitleOffset = min(max(offset, -Self.subtitleOffsetLimit), Self.subtitleOffsetLimit)
+        applySubtitleOffset()
+    }
+
+    func resetSubtitleOffset() {
+        adjustSubtitleOffset(by: -subtitleOffset)
+    }
+
+    /// SRT/ASS files draw in the overlay; other formats are drawn by the player.
+    private func applySubtitleOffset() {
+        subtitleOverlay.setOffset(subtitleOffset)
+        if case .external = subtitleSelection {
+            controller.setSubtitleDelay(subtitleOffset)
+        } else {
+            controller.setSubtitleDelay(0)
         }
     }
 

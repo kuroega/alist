@@ -30,6 +30,7 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
     private var externalSubtitleTitles: [String: String] = [:]
     private var preferredAudioTrackID: String?
     private var preferredEmbeddedSubtitleTrackID: String?
+    private var subtitleDelay: TimeInterval = 0
     private var diagnosticsEnabled = false
     private var nextDiagnosticsUpdateTime: TimeInterval = 0
     private var hasStartedPlayback = false
@@ -186,6 +187,17 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
         subtitleAppearance = appearance
     }
 
+    func setSubtitleDelay(_ seconds: TimeInterval) {
+        subtitleDelay = seconds
+        applySubtitleDelay()
+    }
+
+    /// VLC keeps the delay on the open input, so a reopened media or a newly
+    /// added subtitle track needs it again.
+    private func applySubtitleDelay() {
+        mediaPlayer.currentVideoSubTitleDelay = Int((subtitleDelay * 1_000_000).rounded())
+    }
+
     func setDiagnosticsEnabled(_ enabled: Bool) {
         diagnosticsEnabled = enabled
         nextDiagnosticsUpdateTime = 0
@@ -242,6 +254,7 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
             isPlaying = true
             isSeekable = mediaPlayer.isSeekable
             refreshTracks()
+            applySubtitleDelay()
             applyPendingSeekIfPossible()
         case .paused:
             isPlaying = false
@@ -302,6 +315,7 @@ final class VLCPlayerControllerAdapter: NSObject, ObservableObject, PlayerContro
         } else if type == .text, externalTrackIDs[selectedID] == nil {
             selectedExternalSubtitleID = nil
         }
+        if type == .text { applySubtitleDelay() }
         refreshTracks()
     }
 

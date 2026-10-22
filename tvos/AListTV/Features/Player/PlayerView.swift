@@ -195,6 +195,8 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
     @State private var coverFlowIdleTask: Task<Void, Never>?
     @FocusState private var focus: FocusTarget?
 
+    private var isTuningSubtitles: Bool { presentedPanel == .subtitles }
+
     private var hasSubtitleOptions: Bool {
         !embeddedSubtitleTracks.isEmpty || !coordinator.externalSubtitles.isEmpty || coordinator.externalSubtitleDiscoveryState != .loaded
     }
@@ -216,7 +218,9 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
                 .frame(width: 1, height: 1)
                 .allowsHitTesting(false)
             videoContent()
-            SubtitleOverlayView(text: subtitleOverlay.activeText, appearance: subtitleAppearance)
+            if !isTuningSubtitles {
+                SubtitleOverlayView(text: subtitleOverlay.activeText, appearance: subtitleAppearance)
+            }
             Color.clear
                 .contentShape(Rectangle())
                 .focusable(!isCoverFlowVisible && (!chromeVisible || focus == .surface))
@@ -238,6 +242,13 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
             if isCoverFlowVisible {
                 coverFlowLayer
                     .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
+            // While the Subtitles panel is open the subtitle stays undimmed and
+            // clear of the panel, so timing changes can be judged as they apply.
+            if isTuningSubtitles {
+                SubtitleOverlayView(text: subtitleOverlay.activeText, appearance: subtitleAppearance)
+                    .padding(.trailing, 820)
             }
 
             if let panel = presentedPanel {
@@ -587,6 +598,10 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
                         .accessibilityIdentifier("player.subtitle-appearance")
                         .accessibilityValue("\(subtitleAppearance.font.title), \(subtitleAppearance.color.title), \(subtitleAppearance.opacity.title)")
 
+                        if case .external = coordinator.subtitleSelection {
+                            subtitleTimingSection
+                        }
+
                         sectionLabel("Track")
 
                         trackRow(title: "Off", detail: nil, selected: isOffSelected) {
@@ -643,6 +658,61 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
         .focusSection()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(isSubtitles ? "player.subtitle-panel" : "player.audio-panel")
+    }
+
+    @ViewBuilder
+    private var subtitleTimingSection: some View {
+        let offset = coordinator.subtitleOffset
+        sectionLabel("Timing")
+        HStack(spacing: 20) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(subtitleOffsetText(offset))
+                    .font(.system(size: 29, weight: .semibold).monospacedDigit())
+                Text(subtitleOffsetDetail(offset))
+                    .font(.system(size: 22, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .lineLimit(1)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("player.subtitle-offset")
+            .accessibilityValue(subtitleOffsetText(offset))
+            Spacer(minLength: 12)
+            Button("Reset") { coordinator.resetSubtitleOffset() }
+                .buttonStyle(ChoiceChipButtonStyle(isSelected: false))
+                .focused($focus, equals: .panelItem)
+                .accessibilityIdentifier("player.subtitle-offset-reset")
+        }
+        .padding(.horizontal, 24)
+        .padding(.bottom, 12)
+        .focusSection()
+        HStack(spacing: 16) {
+            ForEach(Self.subtitleOffsetSteps, id: \.self) { step in
+                Button(subtitleOffsetText(step).replacingOccurrences(of: ".0s", with: "s")) { coordinator.adjustSubtitleOffset(by: step) }
+                    .buttonStyle(ChoiceChipButtonStyle(isSelected: false))
+                    .focused($focus, equals: .panelItem)
+                    .accessibilityIdentifier("player.subtitle-offset.\(step < 0 ? "earlier" : "later")-\(abs(step))")
+                    .accessibilityLabel("\(abs(step)) seconds \(step < 0 ? "earlier" : "later")")
+            }
+        }
+        .padding(.horizontal, 24)
+        .padding(.bottom, 8)
+        .focusSection()
+    }
+
+    private static var subtitleOffsetSteps: [TimeInterval] { [-1, -0.1, 0.1, 1] }
+
+    private func subtitleOffsetText(_ offset: TimeInterval) -> String {
+        let magnitude = String(format: "%.1fs", abs(offset))
+        if offset > 0 { return "+" + magnitude }
+        if offset < 0 { return "−" + magnitude }
+        return magnitude
+    }
+
+    private func subtitleOffsetDetail(_ offset: TimeInterval) -> String {
+        let magnitude = String(format: "%.1fs", abs(offset))
+        if offset > 0 { return "Shown \(magnitude) later than the file" }
+        if offset < 0 { return "Shown \(magnitude) earlier than the file" }
+        return "As timed in the file"
     }
 
     private var subtitleAppearancePanel: some View {

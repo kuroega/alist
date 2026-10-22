@@ -79,11 +79,20 @@ enum SubtitleCueParserError: Error { case unsupportedFormat }
 final class SubtitleOverlayModel: ObservableObject {
     @Published private(set) var cues: [SubtitleCue] = []
     @Published private(set) var activeText: String?
+    /// Positive values show each cue later than the file times it.
+    private(set) var offset: TimeInterval = 0
+    private var time: TimeInterval = 0
 
     func install(_ cues: [SubtitleCue]) { self.cues = cues }
     func clear() { cues = []; activeText = nil }
+    func setOffset(_ offset: TimeInterval) {
+        guard offset != self.offset else { return }
+        self.offset = offset
+        update(time: time)
+    }
     func update(time: TimeInterval) {
-        let text = SubtitleCueParser.activeCues(in: cues, at: time).map(\.text).joined(separator: "\n")
+        self.time = time
+        let text = SubtitleCueParser.activeCues(in: cues, at: time - offset).map(\.text).joined(separator: "\n")
         activeText = text.isEmpty ? nil : text
     }
 }
