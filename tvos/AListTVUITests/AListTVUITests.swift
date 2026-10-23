@@ -381,6 +381,27 @@ final class AListTVUITests: XCTestCase {
         waitForPlaybackLabel("Pause", element: playPause)
     }
 
+    func testResumePromptKeepsStartOverFocusedThroughCountdown() {
+        openFixturePlayer()
+        remote.press(.menu)
+        remote.press(.menu)
+
+        let video = app.buttons["browser.item./Sample.mp4"]
+        XCTAssertTrue(video.waitForExistence(timeout: 3))
+        focusAndSelect(video, direction: .right)
+
+        let prompt = app.descendants(matching: .any)["player.resume-prompt"]
+        XCTAssertTrue(prompt.waitForExistence(timeout: 3))
+        let startOver = app.buttons["player.start-over"]
+        focus(startOver, direction: .right)
+
+        // The countdown ticks every second; each tick used to pull focus back
+        // to Continue.
+        Thread.sleep(forTimeInterval: 2.5)
+        XCTAssertTrue(prompt.exists)
+        XCTAssertTrue(startOver.hasFocus, app.debugDescription)
+    }
+
     func testSubtitleSelectionJourney() {
         openFixturePlayer()
         let subtitles = app.buttons["player.subtitles"]

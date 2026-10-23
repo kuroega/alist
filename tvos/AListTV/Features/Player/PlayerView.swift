@@ -295,8 +295,11 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
             guard isCoverFlowVisible, let index = nowPlayingCoverIndex else { return }
             coverFlowIndex = index
         }
-        .onChange(of: coordinator.resumePrompt) { _, prompt in
-            if prompt != nil {
+        // Keyed on presence, not the prompt itself: the countdown rewrites the
+        // prompt every second, and refocusing on each tick would yank focus
+        // back from "Start from beginning".
+        .onChange(of: coordinator.resumePrompt != nil) { _, isPresented in
+            if isPresented {
                 hideChromeTask?.cancel()
                 chromeVisible = true
                 focus = .resume
