@@ -202,4 +202,35 @@ final class GalleryViewModelTests: XCTestCase {
         // The opened episode stays in history, under Recently Watched.
         XCTAssertEqual(viewModel.shelves.playEntries.filter { $0.section == .recent }.map(\.path), [episodes[1]])
     }
+
+    func testWatchingLeadsWithTheTitleLastPlayed() async throws {
+        let server = FakeLibraryServer()
+        await GalleryFixtures.populate(server)
+        let store = GalleryLibraryStore(baseURL: baseURL, username: "alice", defaults: defaults, directory: directory)
+        store.setRoots(["/Movies", "/TV"])
+        store.database.saveMatches([
+            "movie|interstellar|2014": GalleryMatch(tmdbID: 157_336, title: "Interstellar", genreIDs: [878], date: "2014-11-05", matchedAt: Date()),
+            "show|dark": GalleryMatch(tmdbID: 70_523, title: "Dark", genreIDs: [], date: "2017-12-01", matchedAt: Date())
+        ], language: "none")
+        var clock = Date(timeIntervalSince1970: 1_000_000)
+        let progress = PlaybackProgressStore(defaults: defaults, now: { clock })
+        let identity = { (path: String) in PlaybackProgressIdentity(baseURL: self.baseURL.absoluteString, username: "alice", virtualPath: path) }
+        let episodes = ["/TV/Dark/Season 1/Dark.S01E01.mkv", "/TV/Dark/Season 1/Dark.S01E02.mkv"]
+        let movie = "/Movies/Interstellar (2014)/Interstellar.2014.2160p.mkv"
+        progress.update(identity: identity(episodes[0]), position: 600, duration: 3_000)
+        clock += 60
+        progress.update(identity: identity(movie), position: 600, duration: 3_000)
+
+        let viewModel = makeViewModel(server: server, store: store, progress: progress)
+        viewModel.onAppear()
+        await waitUntil { viewModel.phase == .ready && viewModel.catalog.videoCount == 4 }
+        XCTAssertEqual(viewModel.shelves.playEntries.filter { $0.section == .watching }.map(\.path), [movie, episodes[0]])
+
+        // Finishing the next episode leaves the show's card on the one in
+        // progress, but the show was played last, so it moves to the front.
+        clock += 60
+        progress.update(identity: identity(episodes[1]), position: 2_950, duration: 3_000)
+        viewModel.reloadWatchState()
+        XCTAssertEqual(viewModel.shelves.playEntries.filter { $0.section == .watching }.map(\.path), [episodes[0], movie])
+    }
 }

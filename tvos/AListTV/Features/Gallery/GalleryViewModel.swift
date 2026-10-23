@@ -687,14 +687,21 @@ final class GalleryViewModel: ObservableObject {
         let indexedMovies = catalog.movies.filter(\.isIndexed)
         let indexedShows = catalog.shows.filter(\.isIndexed)
 
-        // Watching: files with a resume point, newest first, one card per show.
+        // Watching: one card per title with a resume point, on its newest one,
+        // titles ordered by when any of their files was last played, so the one
+        // just watched leads even if another of its episodes holds the card.
         var seenTitles = Set<GalleryTitle>()
-        let inProgress = watch.progress.keys
-            .compactMap { path -> (String, GalleryTitle, Date)? in
-                guard case .inProgress = watch.status(path), let title = catalog.title(forPath: path), catalog.isIndexed(title) else { return nil }
-                return (path, title, watch.progress[path]?.updatedAt ?? .distantPast)
-            }
-            .sorted { $0.2 > $1.2 }
+        var resumePaths: [GalleryTitle: (path: String, saved: Date)] = [:]
+        var lastPlayed: [GalleryTitle: Date] = [:]
+        for path in Set(watch.progress.keys).union(watch.watched.keys).union(watch.opened.keys) {
+            guard let title = catalog.title(forPath: path), catalog.isIndexed(title) else { continue }
+            if let date = watch.lastActivity(path) { lastPlayed[title] = max(lastPlayed[title] ?? date, date) }
+            guard case .inProgress = watch.status(path), let saved = watch.progress[path]?.updatedAt else { continue }
+            if resumePaths[title].map({ saved > $0.saved }) ?? true { resumePaths[title] = (path, saved) }
+        }
+        let inProgress = resumePaths
+            .map { title, resume in (resume.path, title, lastPlayed[title] ?? resume.saved) }
+            .sorted { $0.2 != $1.2 ? $0.2 > $1.2 : $0.0 < $1.0 }
         for (path, title, date) in inProgress where seenTitles.insert(title).inserted {
             shelves.playEntries.append(GalleryPlayEntry(title: title, path: path, date: date, section: .watching, status: watch.status(path)))
         }
