@@ -1,21 +1,21 @@
 ---
-name: alist-media-rename
-description: Rename or correct AList movie and TV filenames and matching subtitles to TMDB original-language titles. Use for individual folders or recursive collections with exclusions and post-rename verification.
+name: alist-media-organize
+description: Rename AList movie and TV files and matching subtitles to TMDB original-language titles, then organize folders into groups of at most 50 video files. Use for individual folders or recursive collections, including rename-only, reorganization-only, previews, exclusions, and verified recovery.
 ---
 
-# AList Media Rename
+# AList Media Organize
 
-Correct filenames to the work's original-language title, verify the result against TMDB, and preserve video/subtitle pairing. This skill changes filenames; folder names and file contents stay unchanged unless the user requests otherwise.
+Correct filenames to the work's original-language title, verify the result against TMDB, then organize oversized folders into numbered groups while preserving video/subtitle pairing. Never alter file contents. Preserve existing folder names; reorganization creates range subfolders and moves files into them.
 
 Read [references/project-api.md](references/project-api.md) when connecting to this project's AList backend or accessing TMDB. Keep run-specific inventories and journals in a separate temporary directory, outside the installed skill.
 
 ## Establish the scope
 
-Use the current request's target URL/path, recursion, exclusions, and naming preferences. Do not carry collection-specific exclusions forward from previous runs. A rename request authorizes changes within that scope; a preview request does not authorize mutation.
+Use the current request's target URL/path, recursion, exclusions, and naming preferences. Do not carry collection-specific exclusions forward from previous runs. Default to rename, verify, then reorganize within that scope. Honor explicit rename-only, reorganization-only, and preview requests; a preview never authorizes mutation. For reorganization-only, skip TMDB matching and filename changes, retaining existing identifiers.
 
 For URLs, decode each path component once and reject decoded separators rather than accidentally changing directory boundaries. Confirm the actual directory spelling: simplified/traditional characters and Unicode variants are not interchangeable. If a path is missing, inspect its parent for candidates; ask when the intended directory is ambiguous.
 
-Traverse the entire requested scope with complete pagination. Prune excluded directories before descending: compare exact paths for path exclusions, or exact directory components for bare folder names. Inventory videos, external subtitles, and untouched entries with their names, sizes, and stable provider IDs when available. Do not rename from an incomplete listing.
+Traverse the entire requested scope with complete pagination. Prune excluded directories before descending: compare exact paths for path exclusions, or exact directory components for bare folder names. Inventory videos, external subtitles, and untouched entries with their names, sizes, and stable provider IDs when available. Do not rename or move from an incomplete listing. Count actual video files in each source directory separately; subtitles do not consume the 50-video allowance. Do not combine unrelated directories or seasons to fill groups.
 
 ## Match works to TMDB
 
@@ -43,10 +43,14 @@ Re-read affected directories before mutation and reconcile changes since invento
 
 If a response times out, inspect both source and destination before retrying. Resume from the journal and verified remote state, not by replaying the original plan blindly. If a group partially fails, restore confirmed changes in reverse order only when the source identity is established and the old destination is free. Otherwise stop that group and report its exact state; continue only independent resolved groups. Never overwrite or delete an object to force recovery.
 
-## Verify and report
+## Verify renames, then reorganize
 
-Refresh and fully re-list affected directories. Compare the expected names, sizes, IDs where available, and counts against the inventory and journal. Confirm subtitle pairing, removal of successfully renamed old names, and preservation of untouched entries and directory names.
+Refresh and fully re-list affected directories. Compare the expected names, sizes, IDs where available, and counts against the inventory and journal. Confirm subtitle pairing, removal of successfully renamed old names, and preservation of untouched entries and existing directory names.
 
 After renaming, retrieve fresh TMDB details for every distinct work and compare the resulting filename titles to `original_title`/`original_name`. Correct an established mismatch within the same scope and repeat verification. Allow at most two corrective renames per file; stop on persistent failures or uncertain identity and report unresolved items.
 
-Report video/subtitle rename counts, already-correct or skipped files, exclusions, TMDB links, and year/episode-count discrepancies. Distinguish filename verification from playback or content verification. Do not claim completion for entries that could not be checked.
+After successful rename verification, read [references/reorganization.md](references/reorganization.md) and apply its 50-video grouping rules unless the request is rename-only. Build the move plan from the verified post-rename inventory. Do not move unresolved rename or pairing groups; if that prevents complete grouping, report the directory as incomplete. Reorganization-only uses the same reference directly and does not require TMDB access.
+
+## Report
+
+Report video/subtitle rename and move counts, already-correct or skipped files, exclusions, TMDB links when used, and year/episode-count discrepancies. Include each resulting range folder's video/subtitle counts and the final conservation check. Distinguish filename/location verification from playback or content verification. Do not claim completion for entries that could not be checked.

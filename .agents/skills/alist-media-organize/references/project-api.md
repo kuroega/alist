@@ -22,11 +22,13 @@ Responses have an application-level `code`; check it even when HTTP status is 20
 | Login | `POST /api/auth/login` with `username`, `password` | Read `data.token`; use it directly as the AList `Authorization` value. |
 | List | `POST /api/fs/list` with `path`, `password`, `page`, `per_page`, `refresh` | Accumulate `data.content` until `data.total` is satisfied. |
 | Rename | `POST /api/fs/rename` with full source `path`, destination basename `name`, `overwrite: false` | Require application `code: 200`; journal the confirmed change. |
+| Create directory | `POST /api/fs/mkdir` with full `path` | Require application `code: 200`, then verify the directory exists. |
+| Move | `POST /api/fs/move` with `src_dir`, `dst_dir`, `names` (basenames), `overwrite: false` | Check application `code: 200`; verify every source/destination pair, including on partial failure. |
 | Health | `GET /ping` | `pong` verifies server response, not storage-provider availability. |
 
 Use bounded pages, such as 100 entries, and stop on errors or non-progress before claiming inventory completeness. If using `per_page: 0`, confirm this server actually returns all entries. AList directory passwords and account passwords are separate inputs.
 
-A destination name must be a single valid component. AList's single-file rename is not a transaction across video/subtitle pairs; rely on the journal and remote state for recovery.
+A destination name must be a single valid component. AList renames and moves are not transactions across video/subtitle pairs; move batches can partially succeed. Provider listings may lag successful moves. Use refreshed, fully paginated source/destination verification and bounded polling as described in [reorganization.md](reorganization.md); rely on the journal and remote state for recovery.
 
 ## TMDB
 
@@ -44,4 +46,4 @@ Use `https://www.themoviedb.org/movie/{id}` or `https://www.themoviedb.org/tv/{i
 
 ## Minimal run evidence
 
-Keep a sanitized before/after inventory, a source-to-destination plan with TMDB evidence, an append-only success/recovery journal, and per-file verification results. These may be separate files or one coherent run record; they must be sufficient to distinguish no-ops, successes, partial failures, and unresolved entries. Do not reuse collection-specific mappings or fixed expected counts from previous runs.
+Keep a sanitized before/after inventory, a source-to-destination rename/move plan with TMDB evidence when renaming, an append-only success/recovery journal, and per-file verification results. These may be separate files or one coherent run record; they must be sufficient to distinguish no-ops, successes, partial failures, and unresolved entries. Do not reuse collection-specific mappings or fixed expected counts from previous runs.
