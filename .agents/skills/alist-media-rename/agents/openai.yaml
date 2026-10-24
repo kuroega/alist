@@ -1,0 +1,3 @@
+interface:
+  display_name: "AList Media Rename"
+  short_description: "Rename AList videos using TMDB original titles"
