@@ -436,7 +436,8 @@ func validIndex(index Index) bool {
 	if math.IsNaN(index.Duration) || math.IsInf(index.Duration, 0) || index.Duration <= 0 ||
 		len(index.Boundaries) < 2 || len(index.Boundaries) > maxIndexBoundaries ||
 		len(index.seekTimes) != len(index.Boundaries)-1 ||
-		index.Boundaries[0] != 0 || index.Boundaries[len(index.Boundaries)-1] != index.Duration {
+		index.Boundaries[0] != 0 || index.Boundaries[len(index.Boundaries)-1] != index.Duration ||
+		math.IsNaN(index.firstKeyframe) || index.firstKeyframe < 0 || index.firstKeyframe >= index.Boundaries[1] {
 		return false
 	}
 	for n := 1; n < len(index.Boundaries); n++ {
@@ -537,6 +538,12 @@ func (m *Manager) Segment(ctx context.Context, id string, variant Variant, n int
 	start := s.Index.Boundaries[n]
 	duration := s.Index.Boundaries[n+1] - start
 	seek := s.Index.seekTimes[n]
+	// Later intervals open on their keyframe; only the first can begin with
+	// a span the source's video does not cover.
+	videoLead := 0.0
+	if n == 0 {
+		videoLead = s.Index.firstKeyframe
+	}
 	videoCodec := s.Index.VideoCodec
 	// The last interval ends at the container duration, not a keyframe, so
 	// its video legitimately stops short of the slot.
@@ -554,7 +561,7 @@ func (m *Manager) Segment(ctx context.Context, id string, variant Variant, n int
 		}
 		return s.audioDelay
 	}
-	data, err := m.encode(encodeCtx, cancel, sourceURL, readTimeout, videoCodec, variant, seek, start, duration, !final, settleAudioDelay)
+	data, err := m.encode(encodeCtx, cancel, sourceURL, readTimeout, videoCodec, variant, seek, start, duration, videoLead, !final, settleAudioDelay)
 	if err == nil {
 		err = encodeCtx.Err()
 	}
@@ -641,7 +648,7 @@ func (m *Manager) Init(ctx context.Context, id string, variant Variant) ([]byte,
 // render it, so segment audio content already trails its decode time by it.
 const aacPrimingSamples = 1024
 
-func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceURL string, readTimeout time.Duration, videoCodec string, variant Variant, seek, start, duration float64, tileVideo bool, settleAudioDelay func(float64) float64) ([]byte, error) {
+func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceURL string, readTimeout time.Duration, videoCodec string, variant Variant, seek, start, duration, videoLead float64, tileVideo bool, settleAudioDelay func(float64) float64) ([]byte, error) {
 	limit := min(int64(maxSegmentBytes), m.config.MaxCacheBytes)
 	out := &segmentBuffer{limit: int(limit), cancel: cancel}
 	bsf := "h264_mp4toannexb"
@@ -759,6 +766,14 @@ func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceU
 	if err := shiftSegmentTimeline(out.data, start); err != nil {
 		return nil, fmt.Errorf("playback segment timeline: %w", err)
 	}
+	// The muxer starts every track's decode times at the segment origin, so
+	// video the source begins after audio would otherwise be presented early
+	// and fall short of its slot. Restore where the source's video begins.
+	if videoLead > 0 {
+		if err := delayVideoTrack(out.data, videoLead); err != nil {
+			return nil, fmt.Errorf("playback segment video lead: %w", err)
+		}
+	}
 	// Stream-copied B-frame video is presented one reorder delay after the
 	// source (about 83 ms for two B-frames at 24 fps), while the AAC content
 	// trails only by its priming frame. Place audio the remaining delay later
@@ -776,7 +791,7 @@ func (m *Manager) encode(ctx context.Context, cancel context.CancelFunc, sourceU
 		return nil, fmt.Errorf("playback segment AAC timeline: %w", err)
 	}
 	if tileVideo {
-		if err := alignVideoSlot(out.data, start, start+duration); err != nil {
+		if err := alignVideoSlot(out.data, start+videoLead, start+duration); err != nil {
 			return nil, fmt.Errorf("playback segment video timeline: %w", err)
 		}
 	}

@@ -99,6 +99,71 @@ func shiftSegmentTimeline(data []byte, start float64) error {
 	return nil
 }
 
+// delayVideoTrack moves the video track's decode times lead seconds later,
+// leaving the other tracks in place. Run after shiftSegmentTimeline.
+func delayVideoTrack(data []byte, lead float64) error {
+	moov, ok := findTopBox(data, "moov", 1<<20)
+	if !ok {
+		return errors.New("moov not found")
+	}
+	videoID := trackIDWithHandler(moov, "vide")
+	timescale := trackTimescales(moov)[videoID]
+	if videoID == 0 || timescale == 0 {
+		return errors.New("video track not found")
+	}
+	off := uint64(math.Round(lead * float64(timescale)))
+	patched := 0
+	var walkErr error
+	eachBox(data, func(typ string, moof []byte) bool {
+		if typ != "moof" {
+			return true
+		}
+		eachBox(moof, func(typ string, traf []byte) bool {
+			if typ != "traf" {
+				return true
+			}
+			var id uint32
+			eachBox(traf, func(typ string, p []byte) bool {
+				if typ == "tfhd" && len(p) >= 8 {
+					id = binary.BigEndian.Uint32(p[4:8])
+				}
+				return true
+			})
+			if id != videoID {
+				return true
+			}
+			eachBox(traf, func(typ string, p []byte) bool {
+				if typ != "tfdt" {
+					return true
+				}
+				if p[0] == 1 && len(p) >= 12 {
+					binary.BigEndian.PutUint64(p[4:12], binary.BigEndian.Uint64(p[4:12])+off)
+				} else if p[0] != 1 && len(p) >= 8 {
+					v := binary.BigEndian.Uint32(p[4:8])
+					if off > uint64(^uint32(0)-v) {
+						walkErr = errors.New("version 0 tfdt overflows")
+						return false
+					}
+					binary.BigEndian.PutUint32(p[4:8], v+uint32(off))
+				} else {
+					return true
+				}
+				patched++
+				return true
+			})
+			return walkErr == nil
+		})
+		return walkErr == nil
+	})
+	if walkErr != nil {
+		return walkErr
+	}
+	if patched == 0 {
+		return errors.New("no video tfdt patched")
+	}
+	return nil
+}
+
 // alignVideoSlot makes the video sample durations of a segment add up to its
 // playlist slot [start, end). VLC 4 reads tfdt only after a discontinuity and
 // otherwise accumulates trun durations, so any excess or shortfall shifts every

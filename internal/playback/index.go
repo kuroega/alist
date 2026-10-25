@@ -25,6 +25,11 @@ type Index struct {
 	// Seek inside the boundary's first GOP, not exactly on its cue. FFmpeg's
 	// DTS seek heuristic can otherwise select the preceding GOP for B-frames.
 	seekTimes []float64
+	// firstKeyframe is when the first video frame is presented. Releases
+	// remuxed with their B-frame reorder delay start video after audio (84 ms
+	// in one 59.94 fps WEB-DL), leaving the first interval's video that much
+	// shorter than its slot, which starts at 0.
+	firstKeyframe float64
 }
 
 // DolbyVisionConfig mirrors a DOVIDecoderConfigurationRecord (ETSI GS CCM 001).
@@ -488,6 +493,7 @@ func buildIndex(info, tracks, cues []byte, segmentSize int64) (Index, error) {
 		return Index{}, ErrUnsupported
 	}
 	sort.Float64s(times)
+	result.firstKeyframe = times[0]
 	result.Boundaries = []float64{0}
 	for _, seconds := range times {
 		if seconds-result.Boundaries[len(result.Boundaries)-1] >= 6 {

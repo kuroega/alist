@@ -340,7 +340,7 @@ func TestEncodeSurfacesSanitizedFFmpegFailure(t *testing.T) {
 	defer m.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, err = m.encode(ctx, cancel, server.URL+"/movie.mkv?sign=capability-token", rangeTimeout, "h264", Compatible, 0, 0, 6, true, nil)
+	_, err = m.encode(ctx, cancel, server.URL+"/movie.mkv?sign=capability-token", rangeTimeout, "h264", Compatible, 0, 0, 6, 0, true, nil)
 	if err == nil {
 		t.Fatal("expected ffmpeg to fail on a non-media source")
 	}
@@ -1074,5 +1074,100 @@ func TestAudioContentMatchesVideoPresentation(t *testing.T) {
 					n, audioDelay*1000, videoDelay*1000)
 			}
 		}
+	}
+}
+
+// WEB-DL remuxes often start video one B-frame reorder delay after audio, so
+// the first interval's video covers less than its slot, which opens at 0.
+// That lead must survive as a later decode time, not count as a lost frame or
+// present the first interval early.
+func TestFirstSegmentKeepsLateVideoStart(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Skip("ffprobe not installed")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.mkv")
+	cmd := exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-loglevel", "error",
+		"-itsoffset", "0.084", "-f", "lavfi", "-i", "testsrc2=size=128x72:rate=60000/1001",
+		"-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+		"-t", "30", "-c:v", "libx264", "-preset", "ultrafast",
+		"-g", "300", "-keyint_min", "300", "-sc_threshold", "0", "-bf", "2",
+		"-c:a", "ac3", source)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("generate late-video source: %v: %s", err, output)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, source)
+	}))
+	defer server.Close()
+	m := NewManager(Config{FFmpeg: ffmpeg})
+	defer m.Close()
+	info, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := m.Open(ctx, "test\x00lead\x001", server.URL+"/p/source?sign=test&internal_playback=1", info.Size())
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundaries := session.Index.Boundaries
+	if lead := 0.0834; lead < 0.08 || lead > 0.09 || len(boundaries) < 4 {
+		t.Fatalf("first keyframe at %.4f with boundaries %v, want about 0.084 and several slots", lead, boundaries)
+	}
+	// keyframeDelay returns how long after its source time each segment's
+	// opening keyframe is presented, and checks the video fills its slot.
+	keyframeDelay := func(n int, sourceTime float64) float64 {
+		t.Helper()
+		data, err := m.Segment(ctx, session.ID, Compatible, n)
+		if err != nil {
+			t.Fatalf("segment %d: %v", n, err)
+		}
+		segment := filepath.Join(dir, fmt.Sprintf("segment-%d.mp4", n))
+		if err := os.WriteFile(segment, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		output, err := exec.CommandContext(ctx, ffprobe, "-v", "error", "-select_streams", "v:0",
+			"-show_entries", "stream=time_base:packet=pts,dts,duration", "-of", "json", segment).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var probe struct {
+			Streams []struct {
+				TimeBase string `json:"time_base"`
+			} `json:"streams"`
+			Packets []struct {
+				PTS      int64 `json:"pts"`
+				DTS      int64 `json:"dts"`
+				Duration int64 `json:"duration"`
+			} `json:"packets"`
+		}
+		var timescale int64
+		if err := json.Unmarshal(output, &probe); err != nil || len(probe.Streams) != 1 || len(probe.Packets) == 0 {
+			t.Fatalf("probe segment %d: %v %s", n, err, output)
+		}
+		if _, err := fmt.Sscanf(probe.Streams[0].TimeBase, "1/%d", &timescale); err != nil || timescale <= 0 {
+			t.Fatalf("segment %d video time base %q", n, probe.Streams[0].TimeBase)
+		}
+		end := probe.Packets[0].DTS
+		for _, packet := range probe.Packets {
+			end += packet.Duration
+		}
+		if want := int64(math.Round(boundaries[n+1] * float64(timescale))); end != want {
+			t.Fatalf("segment %d video ends at %d ticks, slot ends at %d (1/%d)", n, end, want, timescale)
+		}
+		return float64(probe.Packets[0].PTS)/float64(timescale) - sourceTime
+	}
+	first := keyframeDelay(0, session.Index.firstKeyframe)
+	second := keyframeDelay(1, boundaries[1])
+	if math.Abs(first-second) > 0.001 {
+		t.Fatalf("first segment's video is presented %.1f ms after the source, later ones %.1f ms",
+			first*1000, second*1000)
 	}
 }
