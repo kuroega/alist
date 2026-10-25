@@ -7,9 +7,16 @@ protocol AListAPI: Sendable {
     /// storage; the server requires write permission for it.
     func list(path: String, page: Int, perPage: Int, refresh: Bool) async throws -> DirectoryPage
     func get(path: String) async throws -> FileDetail
+    /// Renames the entry at `path` within its folder, never replacing an
+    /// entry already called `name`.
+    func rename(path: String, name: String) async throws
 }
 
 extension AListAPI {
+    func rename(path: String, name: String) async throws {
+        throw AListAPIError.server(code: 405, message: "Renaming isn’t supported here.")
+    }
+
     func list(path: String, page: Int, perPage: Int) async throws -> DirectoryPage {
         try await list(path: path, page: page, perPage: perPage, refresh: false)
     }

@@ -19,6 +19,29 @@ actor FakeLibraryServer: AListAPI {
     func currentUser() async throws -> CurrentUser { throw AListAPIError.invalidResponse }
     func get(path: String) async throws -> FileDetail { throw AListAPIError.invalidResponse }
 
+    private(set) var renamed: [(path: String, name: String)] = []
+    /// Paths whose rename the server refuses.
+    var refusesRename = Set<String>()
+    func setRefusesRename(_ paths: Set<String>) { refusesRename = paths }
+    func names(in folder: String) -> [String] { folders[folder]?.map(\.name) ?? [] }
+
+    /// Renames in place and, like AList with `overwrite: false`, refuses an existing name.
+    func rename(path: String, name: String) async throws {
+        let parent = AListPath.parent(of: path)
+        guard var children = folders[parent], let index = children.firstIndex(where: { $0.virtualPath == path }) else {
+            throw AListAPIError.server(code: 500, message: "object not found")
+        }
+        if refusesRename.contains(path) { throw AListAPIError.server(code: 403, message: "permission denied") }
+        if children.contains(where: { $0.name == name }) { throw AListAPIError.server(code: 403, message: "file [\(name)] exists") }
+        let old = children[index]
+        children[index] = AListObject(
+            virtualPath: parent == "/" ? "/" + name : parent + "/" + name, name: name, size: old.size, isDirectory: old.isDirectory,
+            modified: old.modified, created: old.created, type: old.type, thumbnail: old.thumbnail
+        )
+        folders[parent] = children
+        renamed.append((path, name))
+    }
+
     func list(path: String, page: Int, perPage: Int, refresh: Bool) async throws -> DirectoryPage {
         listed.append(path)
         if unreadable.contains(path) { throw AListAPIError.transport(message: "Folder is offline") }

@@ -38,6 +38,27 @@ final class AListClientContractTests: XCTestCase {
         XCTAssertEqual(data, LoginData(token: "secret-token", deviceKey: "device-key"))
     }
 
+    func testRenameNeverOverwritesAndAcceptsAnEmptyPayload() async throws {
+        ContractURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/fs/rename")
+            XCTAssertEqual(request.httpMethod, "POST")
+            let body = try Self.bodyData(for: request)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            XCTAssertEqual(object["path"] as? String, "/TV/Dark.S01E01.mkv")
+            XCTAssertEqual(object["name"] as? String, "Dark (2017) S01E01.mkv")
+            XCTAssertEqual(object["overwrite"] as? Bool, false)
+            return Self.response(for: request, status: 200, body: "{\"code\":200,\"message\":\"success\",\"data\":null}")
+        }
+        try await makeClient().rename(path: "/TV/Dark.S01E01.mkv", name: "Dark (2017) S01E01.mkv")
+
+        ContractURLProtocol.handler = { request in
+            Self.response(for: request, status: 200, body: "{\"code\":403,\"message\":\"file [x] exists\",\"data\":null}")
+        }
+        await assertAPIError(.server(code: 403, message: "file [x] exists")) {
+            try await self.makeClient().rename(path: "/TV/a.mkv", name: "x")
+        }
+    }
+
     func testMapsHTTP402ToOTPRequired() async {
         ContractURLProtocol.handler = { request in
             Self.response(for: request, status: 402, body: Fixtures.otpRequired)

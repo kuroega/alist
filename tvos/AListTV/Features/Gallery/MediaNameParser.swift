@@ -296,6 +296,20 @@ enum MediaNameParser {
         return cjkJunkPattern.firstMatch(in: token, range: range) != nil
     }
 
+    /// Release information as written, from the first resolution, source or
+    /// codec tag on (`Show.S01E02.2160p.WEB-DL.DDP5.1` → `2160p.WEB-DL.DDP5.1`),
+    /// so a renamed file keeps it. Nil when the name carries none.
+    static func technicalTail(of stem: String) -> String? {
+        for match in tokenPattern.matches(in: stem, range: NSRange(stem.startIndex..., in: stem)) {
+            guard let range = Range(match.range, in: stem) else { continue }
+            let token = String(stem[range]).trimmingCharacters(in: CharacterSet(charactersIn: "[]()"))
+            guard !token.isEmpty, isTechnicalJunk(token) else { continue }
+            let tail = String(stem[range.lowerBound...]).trimmingCharacters(in: CharacterSet(charactersIn: " ._-"))
+            return tail.isEmpty ? nil : tail
+        }
+        return nil
+    }
+
     // MARK: Qualities
 
     static func detectQualities(in name: String) -> [String] {
@@ -430,6 +444,7 @@ enum MediaNameParser {
     private static let trailingSeasonPattern = regex(#"(?:(?<![a-z])s(\d{1,2})|season\s?(\d{1,2})|第\s*([0-9零一二两三四五六七八九十]+)\s*[季部])\s*-?\s*$"#)
     private static let seasonFolderPattern = regex(#"(?:^|\s)(?:season\s?(\d{1,2})|s(\d{1,2})(?![\de])|第\s*([0-9零一二两三四五六七八九十]+)\s*[季部])(?:\s|$)"#)
     private static let specialsPattern = regex(#"^(specials?|sp|特别篇|特典)$"#)
+    private static let tokenPattern = regex(#"[^ ._]+"#)
     private static let yearPattern = regex(#"(?<![0-9])\(?((?:19|20)\d{2})\)?(?![0-9])"#)
     private static let technicalJunkPattern = regex(
         #"^([248]k|uhd|hd|fhd|blu-?ray|bdrip|brrip|bdremux|remux|web-?dl|webrip|hdtv|hdrip|dvdrip|dvdscr|hdr(10\+?)?|dovi|x26[45]|h-?26[45]|hevc|avc|av1|aac\d?|ac3|e?ac-?3|dts(-?hd)?|ddp?\d?|dd\+|atmos|truehd|flac|10bit|8bit|hi10p)$|\d{3,4}[pi]$|\d{3,4}p"#

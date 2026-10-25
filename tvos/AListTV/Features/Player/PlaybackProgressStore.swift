@@ -99,6 +99,28 @@ struct PlaybackProgressStore {
         defaults.set(data, forKey: Self.watchedDefaultsKey)
     }
 
+    /// Carries a file's resume point and watched mark over to its new path
+    /// after it was renamed on the server.
+    func move(from old: PlaybackProgressIdentity, to new: PlaybackProgressIdentity) {
+        guard old != new else { return }
+        var all = records()
+        if let index = all.firstIndex(where: { $0.identity == old }) {
+            let record = all.remove(at: index)
+            all.removeAll { $0.identity == new }
+            all.append(PlaybackProgressRecord(identity: new, position: record.position, duration: record.duration, updatedAt: record.updatedAt))
+            all.sort { $0.updatedAt > $1.updatedAt }
+            save(all)
+        }
+        var watched = watchedRecords()
+        if let index = watched.firstIndex(where: { $0.identity == old }) {
+            let record = watched.remove(at: index)
+            watched.removeAll { $0.identity == new }
+            watched.insert(WatchedRecord(identity: new, watchedAt: record.watchedAt), at: min(index, watched.count))
+            guard let data = try? encoder.encode(watched) else { return }
+            defaults.set(data, forKey: Self.watchedDefaultsKey)
+        }
+    }
+
     private func records() -> [PlaybackProgressRecord] {
         guard let data = defaults.data(forKey: Self.defaultsKey),
               let decoded = try? decoder.decode([PlaybackProgressRecord].self, from: data) else {

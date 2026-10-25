@@ -51,6 +51,17 @@ actor AListClient: AListAPI {
         )
     }
 
+    func rename(path: String, name: String) async throws {
+        let bodyData: Data
+        do {
+            bodyData = try encoder.encode(RenameRequest(path: path, name: name, overwrite: false))
+        } catch {
+            throw AListAPIError.invalidResponse
+        }
+        // AList answers a rename with `data: null`.
+        _ = try await envelope(path: "/api/fs/rename", method: "POST", bodyData: bodyData, authenticated: true) as APIEnvelope<EmptyPayload>
+    }
+
     private func send<Response: Decodable, Body: Encodable>(
         path: String,
         method: String,
@@ -72,6 +83,20 @@ actor AListClient: AListAPI {
         bodyData: Data?,
         authenticated: Bool
     ) async throws -> Response {
+        let envelope: APIEnvelope<Response> = try await envelope(path: path, method: method, bodyData: bodyData, authenticated: authenticated)
+        guard let payload = envelope.data else {
+            throw AListAPIError.server(code: envelope.code, message: envelope.message)
+        }
+        return payload
+    }
+
+    /// A successful reply's envelope, whose `data` may be empty.
+    private func envelope<Response: Decodable>(
+        path: String,
+        method: String,
+        bodyData: Data?,
+        authenticated: Bool
+    ) async throws -> APIEnvelope<Response> {
         let request = try makeRequest(
             path: path,
             method: method,
@@ -106,12 +131,11 @@ actor AListClient: AListAPI {
         if let mapped = Self.mappedError(code: envelope.code, message: envelope.message) {
             throw mapped
         }
-        guard (200 ... 299).contains(http.statusCode), envelope.code == 200,
-              let payload = envelope.data else {
+        guard (200 ... 299).contains(http.statusCode), envelope.code == 200 else {
             let code = envelope.code == 200 ? http.statusCode : envelope.code
             throw AListAPIError.server(code: code, message: envelope.message)
         }
-        return payload
+        return envelope
     }
 
     private func makeRequest(

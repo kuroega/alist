@@ -133,6 +133,15 @@ struct GetRequest: Encodable, Equatable {
     let path: String
 }
 
+struct RenameRequest: Encodable, Equatable {
+    let path: String
+    let name: String
+    let overwrite: Bool
+}
+
+/// Body of a reply whose `data` carries nothing.
+struct EmptyPayload: Decodable {}
+
 struct FileDetail: Decodable, Equatable, Sendable {
     let rawURL: String
     /// A stream that keeps Dolby Vision metadata which `rawURL` drops; set

@@ -88,6 +88,7 @@ struct TMDBMovieDetail: Decodable, Sendable {
 
     let id: Int
     let title: String?
+    let originalTitle: String?
     let overview: String?
     let tagline: String?
     let runtime: Int?
@@ -122,6 +123,7 @@ struct TMDBShowDetail: Decodable, Sendable {
 
     let id: Int
     let name: String?
+    let originalName: String?
     let overview: String?
     let tagline: String?
     let firstAirDate: String?

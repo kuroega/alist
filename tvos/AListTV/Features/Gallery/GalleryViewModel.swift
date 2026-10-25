@@ -34,6 +34,22 @@ struct GalleryPlayEntry: Identifiable, Hashable {
     var id: String { path }
 }
 
+/// A title waiting for a TMDB match picked by hand.
+struct GalleryMatchSubject: Identifiable {
+    let id = UUID()
+    let title: GalleryTitle
+    let name: String
+}
+
+/// The no-match prompt and the match picker, kept apart from the view model
+/// so the home shell can present them without redrawing on library updates.
+@MainActor
+final class GalleryMatchPresenter: ObservableObject {
+    /// Offers the closest matches after a refresh found no exact one.
+    @Published var prompt: GalleryMatchSubject?
+    @Published var picker: GalleryMatchSubject?
+}
+
 struct GalleryGenreTile: Identifiable, Hashable {
     let genre: TMDBGenre
     let count: Int
@@ -86,6 +102,7 @@ final class GalleryViewModel: ObservableObject {
     /// Pushed Gallery screens. Lives in its own object so the home shell can
     /// bind navigation without redrawing on every library update.
     let navigator = GalleryNavigator()
+    let matchPresenter = GalleryMatchPresenter()
     var path: [GalleryRoute] {
         get { navigator.path }
         set { navigator.path = newValue }
@@ -478,13 +495,150 @@ final class GalleryViewModel: ObservableObject {
             case TMDBError.unauthorized?: notice = "TMDB rejected the API key."
             case .some where refreshed.isEmpty: notice = "Couldn’t reach TMDB to refresh “\(name)”."
             case .some: notice = "Partly refreshed “\(name)”."
-            case nil where refreshed.values.allSatisfy({ $0.tmdbID == nil }): notice = "No exact TMDB match for “\(name)”."
+            case nil where refreshed.values.allSatisfy({ $0.tmdbID == nil }):
+                notice = "No exact TMDB match for “\(name)”."
+                if self.catalog.movie(Self.id(of: title)) != nil || self.catalog.show(Self.id(of: title)) != nil {
+                    self.matchPresenter.prompt = GalleryMatchSubject(title: title, name: name)
+                }
             case nil: notice = "Refreshed “\(name)”."
             }
             self.refreshNotice = notice
             try? await Task.sleep(for: .seconds(4))
             if self.refreshNotice == notice { self.refreshNotice = nil }
         }
+    }
+
+    private static func id(of title: GalleryTitle) -> String {
+        switch title {
+        case let .movie(id), let .show(id): id
+        }
+    }
+
+    // MARK: Choosing a match by hand
+
+    /// Every key the title's files were looked up under.
+    private func matchKeys(for title: GalleryTitle) -> Set<String> {
+        Set(paths(for: title).compactMap { files[$0] }.map { GalleryMatchKey.key(for: $0.parsed) })
+    }
+
+    /// Every indexed video looked up under the title's keys, including
+    /// extra copies of an episode the catalog keeps out of sight.
+    func videos(for title: GalleryTitle) -> [LibraryFile] {
+        let keys = matchKeys(for: title)
+        return files.values.filter { keys.contains(GalleryMatchKey.key(for: $0.parsed)) }.sorted { $0.path < $1.path }
+    }
+
+    /// What the title's files say, preferring one that names a year.
+    func parsedMedia(for title: GalleryTitle) -> ParsedMedia? {
+        let parsed = videos(for: title).map(\.parsed)
+        return parsed.first { $0.year != nil } ?? parsed.first
+    }
+
+    func closestCandidates(for title: GalleryTitle, query: String? = nil) async throws -> [GalleryCandidate] {
+        guard let tmdb, let parsed = parsedMedia(for: title) else { return [] }
+        return try await GalleryMatcher.closestCandidates(to: parsed, query: query, client: tmdb)
+    }
+
+    /// Fetches the chosen entry's details and plans the renames it calls for,
+    /// reading every folder involved so no new name lands on an existing one.
+    func propose(_ candidate: GalleryCandidate, for title: GalleryTitle) async throws -> GalleryMatchProposal {
+        guard let tmdb else { throw TMDBError.missingAPIKey }
+        let resolved = try await GalleryMatcher.resolve(candidate, client: tmdb)
+        let videos = videos(for: title)
+        var contents: [String: [String]] = [:]
+        for folder in Set(videos.map { AListPath.parent(of: $0.path) }) {
+            do {
+                contents[folder] = try await listNames(in: folder)
+            } catch AListAPIError.unauthorized {
+                await onUnauthorized()
+                throw AListAPIError.unauthorized
+            } catch {
+                // The plan skips that folder's videos and says why.
+            }
+        }
+        let plan = GalleryRenamer.plan(videos: videos, title: resolved.fileTitle, year: resolved.year, folderContents: contents)
+        return GalleryMatchProposal(candidate: candidate, match: resolved.match, fileTitle: resolved.fileTitle, year: resolved.year, plan: plan)
+    }
+
+    private func listNames(in folder: String) async throws -> [String] {
+        var names: [String] = []
+        var page = 1
+        while true {
+            let listing = try await api.list(path: folder, page: page, perPage: 200)
+            names += listing.content.map(\.name)
+            guard !listing.content.isEmpty, listing.hasMore ?? (listing.content.count == 200) else { return names }
+            page += 1
+        }
+    }
+
+    /// Optionally renames the title's files (each video before its
+    /// subtitles, one at a time, never overwriting), then stores the chosen
+    /// match under every key old and new so the title is indexed at once.
+    /// Resume points, watched marks and recents follow renamed videos.
+    func apply(
+        _ proposal: GalleryMatchProposal,
+        to title: GalleryTitle,
+        renaming: Bool,
+        progress: @escaping @MainActor (Int, Int) -> Void = { _, _ in }
+    ) async -> GalleryMatchOutcome {
+        var outcome = GalleryMatchOutcome()
+        let oldKeys = matchKeys(for: title)
+        if renaming {
+            let total = proposal.plan.fileCount
+            var done = 0
+            groups: for group in proposal.plan.groups {
+                for rename in [group.video] + group.subtitles {
+                    do {
+                        try await api.rename(path: rename.path, name: rename.newName)
+                        outcome.renamed.append(rename)
+                    } catch AListAPIError.unauthorized {
+                        outcome.failures.append(.init(path: rename.path, reason: AListAPIError.unauthorized.errorDescription ?? ""))
+                        await onUnauthorized()
+                        break groups
+                    } catch {
+                        outcome.failures.append(.init(path: rename.path, reason: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription))
+                        // A video left as it was keeps its subtitles' names too.
+                        if rename == group.video {
+                            done += 1 + group.subtitles.count
+                            progress(done, total)
+                            continue groups
+                        }
+                    }
+                    done += 1
+                    progress(done, total)
+                }
+            }
+        }
+
+        var stored: [String: GalleryMatch] = [:]
+        for key in oldKeys { stored[key] = proposal.match }
+        let videoRenames = Set(proposal.plan.groups.map(\.video))
+        for rename in outcome.renamed where videoRenames.contains(rename) {
+            movePlaybackState(from: rename.path, to: rename.newPath, name: rename.newName)
+            guard let file = files.removeValue(forKey: rename.path) else { continue }
+            let moved = LibraryFile(path: rename.newPath, name: rename.newName, size: file.size, modified: file.modified, parsed: MediaNameParser.parse(path: rename.newPath))
+            if belongsInLibrary(moved.path) { files[moved.path] = moved }
+            stored[GalleryMatchKey.key(for: moved.parsed)] = proposal.match
+        }
+        outcome.matched = !stored.isEmpty
+        matches.merge(stored) { $1 }
+        for key in stored.keys { matchQueue[key] = nil }
+        database.saveMatches(stored, language: metadataLanguage)
+        updateMatchProgress()
+        rebuildCatalog()
+        reloadWatchState()
+        if !outcome.renamed.isEmpty {
+            // The store still lists the old names; relist those folders.
+            for folder in Set(outcome.renamed.map(\.folder)) { database.forgetListing(of: folder) }
+            requestScan(.quick)
+        }
+        return outcome
+    }
+
+    private func movePlaybackState(from old: String, to new: String, name: String) {
+        let identity = { PlaybackProgressIdentity(baseURL: self.account.baseURL, username: self.account.username, virtualPath: $0) }
+        progressStore.move(from: identity(old), to: identity(new))
+        recentItemsStore.move(path: old, to: new, name: name, account: account)
     }
 
     // MARK: Library folders
@@ -922,8 +1076,11 @@ final class GalleryViewModel: ObservableObject {
                 switch result {
                 case let .success(match):
                     networkFailures = 0
-                    matches[key] = match
-                    unsaved[key] = match
+                    // A title matched by hand meanwhile keeps that match.
+                    if match.tmdbID != nil || matches[key]?.tmdbID == nil {
+                        matches[key] = match
+                        unsaved[key] = match
+                    }
                 case .failure(TMDBError.unauthorized):
                     issue = "TMDB rejected the API key. Check TMDB.local.plist."
                     // Every other lookup would fail the same way.
@@ -1100,7 +1257,7 @@ enum GalleryMatcher {
 
     /// Localized search results omit artwork that only exists in other
     /// languages; borrow it (viewer's language, then English, then textless).
-    private static func withFallbackArtwork(
+    static func withFallbackArtwork(
         _ match: GalleryMatch,
         client: TMDBClient,
         images: () async throws -> TMDBImageSet

@@ -60,6 +60,21 @@ struct RecentItemsStore {
         return save(all, returning: account)
     }
 
+    /// Points a recent item at its file's new path and name after a rename.
+    @discardableResult
+    func move(path: String, to newPath: String, name: String, account: RecentItemsAccount) -> [RecentItem] {
+        let all = records().map { item -> RecentItem in
+            guard item.account == account, item.object.virtualPath == path else { return item }
+            let object = item.object
+            let renamed = AListObject(
+                virtualPath: newPath, name: name, size: object.size, isDirectory: object.isDirectory,
+                modified: object.modified, created: object.created, type: object.type, thumbnail: object.thumbnail
+            )
+            return RecentItem(account: account, object: renamed, openedAt: item.openedAt)
+        }
+        return save(all, returning: account)
+    }
+
     @discardableResult
     func removeAll(account: RecentItemsAccount) -> [RecentItem] {
         var all = records()

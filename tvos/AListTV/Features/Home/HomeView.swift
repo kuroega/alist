@@ -51,6 +51,7 @@ struct HomeView: View {
                 .toolbar(.hidden, for: .navigationBar)
                 .navigationDestination(for: GalleryRoute.self, destination: galleryDestination)
         }
+        .modifier(GalleryMatchPresentation(presenter: gallery.matchPresenter, viewModel: gallery))
         .onChange(of: player.isPresented) { _, isPresented in
             // The player saves its resume point on dismissal; refresh the bars.
             if !isPresented {
