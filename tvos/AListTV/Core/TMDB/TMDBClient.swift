@@ -95,23 +95,36 @@ final class TMDBClient: Sendable {
     }()
 
     let language: String
+    /// Skips cached responses and asks TMDB again, storing the fresh answers.
+    let bypassesCache: Bool
     private let apiKey: String
     private let session: URLSession
     private let cache: TMDBResponseCache
     private let gate: TMDBRequestGate
 
-    init(
+    convenience init(
         apiKey: String,
         language: String = TMDBConfiguration.language(),
         session: URLSession = TMDBClient.defaultSession,
         cache: TMDBResponseCache = TMDBResponseCache(),
         maxConcurrentRequests: Int = TMDBClient.maxConcurrentRequests
     ) {
+        self.init(apiKey: apiKey, language: language, session: session, cache: cache, gate: TMDBRequestGate(limit: maxConcurrentRequests), bypassesCache: false)
+    }
+
+    private init(apiKey: String, language: String, session: URLSession, cache: TMDBResponseCache, gate: TMDBRequestGate, bypassesCache: Bool) {
         self.apiKey = apiKey
         self.language = language
         self.session = session
         self.cache = cache
-        self.gate = TMDBRequestGate(limit: maxConcurrentRequests)
+        self.gate = gate
+        self.bypassesCache = bypassesCache
+    }
+
+    /// The same client, but every request goes to TMDB and refreshes the
+    /// cache, for re-fetching one title's metadata on demand.
+    func bypassingCache() -> TMDBClient {
+        TMDBClient(apiKey: apiKey, language: language, session: session, cache: cache, gate: gate, bypassesCache: true)
     }
 
     private static func decode<Response: Decodable>(_ type: Response.Type, from data: Data) throws -> Response {
@@ -176,7 +189,7 @@ final class TMDBClient: Sendable {
         let queryItems = (items + [URLQueryItem(name: "language", value: language ?? self.language)]).sorted { $0.name < $1.name }
         let cacheKey = path + "?" + queryItems.map { "\($0.name)=\($0.value ?? "")" }.joined(separator: "&")
 
-        if let data = await cache.data(for: cacheKey, maxAge: maxAge), let decoded = try? Self.decode(Response.self, from: data) {
+        if !bypassesCache, let data = await cache.data(for: cacheKey, maxAge: maxAge), let decoded = try? Self.decode(Response.self, from: data) {
             return decoded
         }
 
@@ -196,8 +209,9 @@ final class TMDBClient: Sendable {
             data = try await gate.run(key: cacheKey) { try await Self.fetch(request, session: session) }
         } catch let TMDBError.transport(message) {
             if Task.isCancelled { throw CancellationError() }
-            // Stale data beats an empty shelf when the network drops.
-            if let stale = await cache.data(for: cacheKey, maxAge: .infinity), let decoded = try? Self.decode(Response.self, from: stale) {
+            // Stale data beats an empty shelf when the network drops, but a
+            // forced refresh reports the failure instead of the old answer.
+            if !bypassesCache, let stale = await cache.data(for: cacheKey, maxAge: .infinity), let decoded = try? Self.decode(Response.self, from: stale) {
                 return decoded
             }
             throw TMDBError.transport(message)

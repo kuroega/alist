@@ -370,7 +370,7 @@ private struct GalleryStatusLine: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            if viewModel.isScanning || viewModel.matchProgress != nil {
+            if viewModel.isScanning || viewModel.matchProgress != nil || !viewModel.refreshingTitles.isEmpty {
                 ProgressView().scaleEffect(0.7).frame(width: 30, height: 30)
             }
             Text(text)
@@ -383,6 +383,8 @@ private struct GalleryStatusLine: View {
     }
 
     private var text: String {
+        // Asked for by hand, so it outranks a background update.
+        if let notice = viewModel.refreshNotice { return notice }
         if case let .scanning(progress) = viewModel.phase {
             return "Updating · \(progress.videosFound) videos"
         }
@@ -753,6 +755,12 @@ struct GalleryTitleMenu: View {
         }
         if let file {
             Button { onReveal(file.object) } label: { Label("Show in Browse", systemImage: "folder") }
+        }
+        if viewModel.hasMetadata {
+            Button { viewModel.refreshMetadata(for: title) } label: {
+                Label("Refresh Metadata", systemImage: "arrow.triangle.2.circlepath")
+            }
+            .disabled(viewModel.isRefreshing(title))
         }
         let excludable = paths.filter(viewModel.canExclude)
         if !excludable.isEmpty {

@@ -78,6 +78,10 @@ final class GalleryViewModel: ObservableObject {
     @Published private(set) var matchProgress: (done: Int, total: Int)?
     @Published private(set) var metadataIssue: String?
     @Published private(set) var libraryIssue: String?
+    /// Titles whose metadata is being fetched again by hand.
+    @Published private(set) var refreshingTitles = Set<GalleryTitle>()
+    /// Progress or outcome of the last hand refresh, shown briefly.
+    @Published private(set) var refreshNotice: String?
 
     /// Pushed Gallery screens. Lives in its own object so the home shell can
     /// bind navigation without redrawing on every library update.
@@ -400,6 +404,86 @@ final class GalleryViewModel: ObservableObject {
             self.matchesReady = true
             self.rebuildCatalog()
             self.enqueueMatches(for: self.files.values)
+        }
+    }
+
+    // MARK: Refreshing one title
+
+    func isRefreshing(_ title: GalleryTitle) -> Bool { refreshingTitles.contains(title) }
+
+    /// Looks one title up on TMDB again, ignoring its stored match and every
+    /// cached response, then fetches its details and seasons afresh. For a
+    /// wrong match, or artwork and details TMDB has changed since.
+    func refreshMetadata(for title: GalleryTitle) {
+        guard let tmdb, !refreshingTitles.contains(title) else { return }
+        // Every spelling the title's files were looked up under, with the
+        // seasons its episodes belong to.
+        var lookups: [String: ParsedMedia] = [:]
+        var seasons: [String: Set<Int>] = [:]
+        for path in paths(for: title) {
+            guard let parsed = files[path]?.parsed else { continue }
+            let key = GalleryMatchKey.key(for: parsed)
+            if lookups[key]?.year == nil { lookups[key] = parsed }
+            if parsed.kind == .episode { seasons[key, default: []].insert(parsed.season ?? 1) }
+            // A queued lookup would only repeat this one.
+            matchQueue[key] = nil
+        }
+        guard !lookups.isEmpty else { return }
+        let name = card(for: title)?.title ?? "this title"
+        let generation = matchGeneration
+        let language = metadataLanguage
+        let client = tmdb.bypassingCache()
+        refreshingTitles.insert(title)
+        refreshNotice = "Refreshing “\(name)”…"
+        updateMatchProgress()
+        Task { [weak self] in
+            var refreshed: [String: GalleryMatch] = [:]
+            var failure: Error?
+            var movies: [Int: TMDBMovieDetail] = [:]
+            var shows: [Int: TMDBShowDetail] = [:]
+            var seasonInfo: [String: TMDBSeasonDetail] = [:]
+            for (key, parsed) in lookups {
+                do {
+                    let match = try await GalleryMatcher.match(parsed, client: client)
+                    refreshed[key] = match
+                    guard let id = match.tmdbID else { continue }
+                    switch parsed.kind {
+                    case .movie:
+                        movies[id] = try? await client.movie(id: id)
+                    case .episode:
+                        shows[id] = try? await client.show(id: id)
+                        for season in seasons[key] ?? [] {
+                            seasonInfo["\(id)-\(season)"] = try? await client.season(showID: id, number: season)
+                        }
+                    }
+                } catch {
+                    failure = error
+                }
+            }
+            guard let self else { return }
+            self.refreshingTitles.remove(title)
+            // A language switch or full clean-up started over meanwhile.
+            guard self.matchGeneration == generation, self.metadataLanguage == language else { return }
+            self.matches.merge(refreshed) { $1 }
+            self.database.saveMatches(refreshed, language: language)
+            self.movieDetails.merge(movies) { $1 }
+            self.showDetails.merge(shows) { $1 }
+            self.seasonDetails.merge(seasonInfo) { $1 }
+            self.rebuildCatalog()
+            // Keys this run could not refresh go back to the regular queue.
+            self.enqueueMatches(for: self.files.values)
+
+            let notice: String
+            switch failure {
+            case TMDBError.unauthorized?: notice = "TMDB rejected the API key."
+            case .some where refreshed.isEmpty: notice = "Couldn’t reach TMDB to refresh “\(name)”."
+            case .some: notice = "Partly refreshed “\(name)”."
+            case nil where refreshed.values.allSatisfy({ $0.tmdbID == nil }): notice = "No exact TMDB match for “\(name)”."
+            case nil: notice = "Refreshed “\(name)”."
+            }
+            self.refreshNotice = notice
+            try? await Task.sleep(for: .seconds(4))
+            if self.refreshNotice == notice { self.refreshNotice = nil }
         }
     }
 
