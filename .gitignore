@@ -49,3 +49,4 @@ tvos-backend.md
 
 # Local TMDB credential bundled into the tvOS app (see tvos/Config/TMDB.local.plist.example)
 /tvos/AListTV/Resources/TMDB.local.plist
+/.windows_sub_path.env
