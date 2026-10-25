@@ -44,6 +44,8 @@ API base: `https://api.themoviedb.org/3`. A v3 API key uses the `api_key` query 
 
 Use `https://www.themoviedb.org/movie/{id}` or `https://www.themoviedb.org/tv/{id}` as evidence links. When using the website, establish the original-language title rather than assuming the page's localized heading is the original.
 
+If the API credential is unavailable or rejected, try the public TMDB work and season pages. If the browsing tool cannot fetch them, a direct HTTP request with native `curl` may still work. Check the returned document contains the expected work ID, original-name facts, and relevant episode records rather than an error or challenge page. Save the retrieved evidence in the run directory. Search snippets can help locate a page, but stale snippets alone do not establish a current episode mapping. Never treat a failed API request as successful verification or record credential-bearing request URLs.
+
 ## Minimal run evidence
 
 Keep a sanitized before/after inventory, a source-to-destination rename/move plan with TMDB evidence when renaming, an append-only success/recovery journal, and per-file verification results. These may be separate files or one coherent run record; they must be sufficient to distinguish no-ops, successes, partial failures, and unresolved entries. Do not reuse collection-specific mappings or fixed expected counts from previous runs.
