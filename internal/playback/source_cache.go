@@ -20,9 +20,14 @@ import (
 )
 
 const (
-	sourceCacheVersion      = 1
-	sourceChunkTimeout      = time.Minute
-	sourcePrefetchThreshold = 2 << 20
+	sourceCacheVersion = 1
+	sourceChunkTimeout = time.Minute
+	// Chunks fetched ahead of a reader once its current chunk is ready. A
+	// 32 MiB chunk takes ~9 s from Quark; starting the next one only 2 MiB
+	// before it was needed (~1.5 s of a 10 Mbit/s episode) stalled a segment
+	// every few, and a retried fetch (38 s) outlasted the player's buffer.
+	// Two ahead keeps one download in flight with a full chunk of lead time.
+	sourcePrefetchChunks = 2
 	// A transient upstream failure must not fail the whole segment.
 	sourceChunkAttempts = 3
 	sourceChunkBackoff  = 200 * time.Millisecond
@@ -51,13 +56,14 @@ type sourceCacheRecord struct {
 }
 
 type sourceStore struct {
-	mu         sync.Mutex
-	root       string
-	maxBytes   int64
-	chunkBytes int64
-	client     *http.Client
-	records    map[string]*sourceCacheRecord
-	usedBytes  int64
+	mu             sync.Mutex
+	root           string
+	maxBytes       int64
+	chunkBytes     int64
+	prefetchChunks int64
+	client         *http.Client
+	records        map[string]*sourceCacheRecord
+	usedBytes      int64
 }
 
 type sourceEntry struct {
@@ -77,14 +83,13 @@ type sourceChunkCall struct {
 }
 
 type sourceStream struct {
-	ctx        context.Context
-	entry      *sourceEntry
-	offset     int64
-	remaining  int64
-	read       int64
-	file       *os.File
-	fileChunk  int64
-	prefetched int64
+	ctx       context.Context
+	entry     *sourceEntry
+	offset    int64
+	remaining int64
+	read      int64
+	file      *os.File
+	fileChunk int64
 }
 
 func newSourceStore(root string, maxBytes, chunkBytes int64, client *http.Client) (*sourceStore, error) {
@@ -105,7 +110,7 @@ func newSourceStore(root string, maxBytes, chunkBytes int64, client *http.Client
 		return nil, errors.New("could not secure playback source cache directory")
 	}
 	store := &sourceStore{
-		root: absolute, maxBytes: maxBytes, chunkBytes: chunkBytes,
+		root: absolute, maxBytes: maxBytes, chunkBytes: chunkBytes, prefetchChunks: sourcePrefetchChunks,
 		client: client, records: make(map[string]*sourceCacheRecord),
 	}
 	if err := store.scan(); err != nil {
@@ -581,7 +586,7 @@ func (e *sourceEntry) serve(w http.ResponseWriter, r *http.Request) error {
 	}
 	stream := &sourceStream{
 		ctx: r.Context(), entry: e, offset: start, remaining: length,
-		fileChunk: -1, prefetched: -1,
+		fileChunk: -1,
 	}
 	defer stream.Close()
 	written, err := io.CopyN(w, stream, length)
@@ -618,6 +623,12 @@ func (r *sourceStream) Read(p []byte) (int, error) {
 			return 0, errors.New("could not open playback source cache chunk")
 		}
 		r.file, r.fileChunk = file, index
+		// Only once this chunk is ready: a cold seek must not split the
+		// upstream bandwidth it is waiting on. Chunks already cached or in
+		// flight are not fetched again.
+		for ahead := index + 1; ahead <= index+r.entry.store.prefetchChunks; ahead++ {
+			r.entry.prefetch(r.ctx, ahead)
+		}
 	}
 	within := r.offset % r.entry.store.chunkBytes
 	count := min(int64(len(p)), r.remaining, r.entry.record.chunkLength(index, r.entry.store.chunkBytes)-within)
@@ -625,14 +636,6 @@ func (r *sourceStream) Read(p []byte) (int, error) {
 	r.offset += int64(n)
 	r.remaining -= int64(n)
 	r.read += int64(n)
-	// A seek may land near the end of a cached chunk. Prefetch by
-	// distance to the next chunk, not bytes read on this connection:
-	// waiting for two MB of reads can leave no lead time at all.
-	chunkEnd := min((index+1)*r.entry.store.chunkBytes, r.entry.record.size)
-	if chunkEnd-r.offset <= sourcePrefetchThreshold && r.prefetched != index+1 && r.remaining > 0 {
-		r.prefetched = index + 1
-		r.entry.prefetch(r.ctx, index+1)
-	}
 	if errors.Is(err, io.EOF) && int64(n) == count {
 		err = nil
 	}

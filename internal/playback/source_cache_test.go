@@ -11,7 +11,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -30,6 +32,8 @@ func TestSourceCacheCoalescesRangesAndSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Count only the chunks this range needs; read-ahead is covered below.
+	store.prefetchChunks = 0
 	entry, err := store.acquire("movie:revision", origin.URL, int64(len(data)))
 	if err != nil {
 		t.Fatal(err)
@@ -87,6 +91,61 @@ func TestSourceCacheCoalescesRangesAndSurvivesRestart(t *testing.T) {
 		t.Fatalf("persisted cache read: %q %v", got, err)
 	}
 	restarted.release(persisted)
+}
+
+func TestSourceStreamPrefetchesAheadOnceChunkIsReady(t *testing.T) {
+	// Eight full chunks and a short ninth.
+	data := append(bytes.Repeat([]byte("0123456789abcdef"), 4), "xy"...)
+	var mu sync.Mutex
+	var ranges []string
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		ranges = append(ranges, r.Header.Get("Range"))
+		mu.Unlock()
+		http.ServeContent(w, r, "source.mkv", time.Time{}, bytes.NewReader(data))
+	}))
+	defer origin.Close()
+	store, err := newSourceStore(t.TempDir(), 1024, 8, origin.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := store.acquire("movie:ahead", origin.URL, int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.release(entry)
+
+	// A read that stays inside chunk 1, far from its end, still starts the
+	// next two chunks: waiting for the chunk's last bytes left no lead time.
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/source", nil)
+	req.Header.Set("Range", "bytes=9-10")
+	if err := entry.serve(httptest.NewRecorder(), req); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		entry.mu.Lock()
+		ready := entry.ready[2] != "" && entry.ready[3] != ""
+		entry.mu.Unlock()
+		if ready {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("chunks 2 and 3 were not prefetched")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Give a stray fetch of chunk 4 time to show up before counting.
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"bytes=8-15", "bytes=16-23", "bytes=24-31"}
+	got := append([]string(nil), ranges...)
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("source ranges = %v, want %v", got, want)
+	}
 }
 
 func TestSourceCacheRejectsTruncatedChunk(t *testing.T) {
