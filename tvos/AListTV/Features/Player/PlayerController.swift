@@ -98,16 +98,18 @@ struct PlaybackDiagnosticsSnapshot: Equatable, Sendable {
 }
 
 enum PlaybackPresentation {
-    private static let matroskaExtensions: Set<String> = ["mkv", "mka", "mk3d", "webm"]
-
     /// VLC's default Matroska demuxer treats Cues as untrusted and, over HTTP
     /// (not fast-seekable), cannot verify them, so a seek resumes from the last
     /// keyframe it already demuxed and reads every byte up to the target: a
     /// jump to 1:14:00 in a 6.7 GB remux streamed ~5 GB through the proxy.
-    /// `mkv_trusted` seeks straight to the cue; `any` keeps misnamed files
-    /// playable when the Matroska probe rejects them.
+    /// `mkv_trusted` seeks straight to the cue; `any` falls back to the usual
+    /// probe when the file is not Matroska.
+    ///
+    /// The extension cannot tell: WEB-DL episodes are often Matroska saved as
+    /// `.mp4`, and a 29:53 seek in one read 3.2 GB (11 min) before resuming.
+    /// HLS playlists are left to VLC's adaptive demuxer.
     static func vlcDemuxOption(for url: URL) -> String? {
-        matroskaExtensions.contains(url.pathExtension.lowercased()) ? ":demux=mkv_trusted,any" : nil
+        url.pathExtension.lowercased() == "m3u8" ? nil : ":demux=mkv_trusted,any"
     }
 
     static func clampedSeekTarget(_ seconds: TimeInterval, duration: TimeInterval) -> TimeInterval {
