@@ -18,6 +18,7 @@ import (
 	"github.com/alist-org/alist/v3/internal/sign"
 	"github.com/alist-org/alist/v3/server/common"
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 )
 
 var playbackManager *playback.Manager
@@ -119,7 +120,12 @@ func Playback(c *gin.Context) {
 			c.Status(http.StatusNotFound)
 			return
 		}
-		if err := playbackManager.Source(c.Writer, c.Request, id); err != nil && !c.Writer.Written() {
+		err := playbackManager.Source(c.Writer, c.Request, id)
+		// ffmpeg drops its connection once it has read a segment's span.
+		if err != nil && c.Request.Context().Err() == nil {
+			log.Warnf("playback %s source read failed: %v", playback.SessionTag(id), err)
+		}
+		if err != nil && !c.Writer.Written() {
 			if errors.Is(err, playback.ErrExpired) {
 				c.String(http.StatusGone, "Playback session expired; reopen the file")
 			} else {
@@ -130,6 +136,7 @@ func Playback(c *gin.Context) {
 	}
 	session, err := playbackManager.Get(id)
 	if err != nil {
+		log.Warnf("playback %s %s: status %d: %v", playback.SessionTag(id), resource, http.StatusGone, err)
 		c.String(http.StatusGone, "Playback session expired; reopen the file")
 		return
 	}
@@ -148,8 +155,12 @@ func Playback(c *gin.Context) {
 		return
 	}
 	if name == "init.mp4" {
+		started := time.Now()
+		var failure error
+		defer func() { logPlaybackResponse(c, session.Tag(), resource, started, failure) }()
 		data, err := playbackManager.Init(c.Request.Context(), id, variant)
 		if err != nil {
+			failure = err
 			if errors.Is(err, playback.ErrExpired) {
 				c.String(http.StatusGone, "Playback session expired; reopen the file")
 			} else {
@@ -172,16 +183,21 @@ func Playback(c *gin.Context) {
 		c.Status(http.StatusOK)
 		return
 	}
+	started := time.Now()
+	var failure error
+	defer func() { logPlaybackResponse(c, session.Tag(), resource, started, failure) }()
 	select {
 	case playbackTransfers <- struct{}{}:
 		defer func() { <-playbackTransfers }()
 	default:
+		failure = errTransferCapacity
 		c.Header("Retry-After", "2")
 		c.String(http.StatusServiceUnavailable, "Playback transfer capacity reached")
 		return
 	}
 	data, err := playbackManager.Segment(c.Request.Context(), id, variant, index)
 	if err != nil {
+		failure = err
 		switch {
 		case errors.Is(err, playback.ErrBusy):
 			c.Header("Retry-After", "2")
@@ -197,8 +213,28 @@ func Playback(c *gin.Context) {
 	// init.mp4, and a moov repeated inside every fragment resets decoders.
 	_, media, ok := playback.SplitInit(data)
 	if !ok {
+		failure = errors.New("segment has no media after its initialization")
 		c.String(http.StatusBadGateway, "Compatible media segment could not be generated")
 		return
 	}
 	http.ServeContent(c.Writer, c.Request, resource, time.Time{}, bytes.NewReader(media))
+}
+
+var errTransferCapacity = errors.New("all playback transfers in use")
+
+// logPlaybackResponse records what the player was sent for an init or media
+// segment. The access log skips playback paths (they are capabilities), so
+// without this a busy rejection or failed segment left no trace of the
+// status the player saw. Only the session tag is logged, never its ID.
+func logPlaybackResponse(c *gin.Context, tag, resource string, started time.Time, failure error) {
+	if failure == nil {
+		failure = c.Request.Context().Err()
+	}
+	status, size := c.Writer.Status(), max(0, c.Writer.Size())
+	elapsed := time.Since(started).Round(time.Millisecond)
+	if failure != nil || status >= http.StatusBadRequest {
+		log.Warnf("playback %s %s: status %d, %d bytes in %s err=%v", tag, resource, status, size, elapsed, failure)
+		return
+	}
+	log.Infof("playback %s %s: status %d, %d bytes in %s", tag, resource, status, size, elapsed)
 }

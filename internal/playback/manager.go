@@ -4,7 +4,9 @@ import (
 	"container/list"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -114,6 +116,19 @@ func (s *Session) DolbyVision() *DolbyVisionConfig {
 		return nil
 	}
 	return dv
+}
+
+// Tag names the session in logs. The ID is a bearer capability (it is the
+// playback URL), so logs carry this one-way digest of it instead; it is
+// enough to tell concurrent viewers apart.
+func (s *Session) Tag() string {
+	return SessionTag(s.ID)
+}
+
+// SessionTag is Session.Tag for a request that has only the ID.
+func SessionTag(id string) string {
+	digest := sha256.Sum256([]byte(id))
+	return hex.EncodeToString(digest[:4])
 }
 
 func (s *Session) offers(variant Variant) bool {
@@ -580,9 +595,10 @@ func (m *Manager) Segment(ctx context.Context, id string, variant Variant, n int
 	}
 	stop()
 	cancel()
-	// No URLs, paths, or session IDs: segment index, byte size, and wall
-	// time only. Used to separate encoder/source latency from delivery.
-	log.Infof("playback segment %d: %d bytes in %s err=%v", n, len(data), time.Since(encodeStart).Round(time.Millisecond), err)
+	// No URLs, paths, or session IDs: the session tag, segment index, byte
+	// size, and wall time only. Used to separate encoder/source latency from
+	// delivery; the handler logs what the player was then sent.
+	log.Infof("playback %s segment %d: %d bytes in %s err=%v", s.Tag(), n, len(data), time.Since(encodeStart).Round(time.Millisecond), err)
 
 	m.mu.Lock()
 	<-m.slots

@@ -392,6 +392,17 @@ func playbackSessionFixture(m *Manager, id, key string) *Session {
 	return s
 }
 
+func TestSessionTagIsShortStableAndHidesID(t *testing.T) {
+	id := "bearer-capability-id"
+	tag := SessionTag(id)
+	if len(tag) != 8 || tag != SessionTag(id) || strings.Contains(id, tag) || tag == SessionTag(id+"x") {
+		t.Fatalf("SessionTag(%q) = %q", id, tag)
+	}
+	if got := (&Session{ID: id}).Tag(); got != tag {
+		t.Fatalf("Session.Tag() = %q, want %q", got, tag)
+	}
+}
+
 func TestSessionAccessRefreshesIdleExpiry(t *testing.T) {
 	m := NewManager(Config{IdleTimeout: time.Minute})
 	defer m.Close()
