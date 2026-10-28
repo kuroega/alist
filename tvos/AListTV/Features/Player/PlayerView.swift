@@ -155,8 +155,8 @@ struct FixturePlayerContainerView: View {
 #endif
 
 private struct ImmersivePlaybackStage<VideoContent: View>: View {
-    private enum FocusTarget: Hashable { case surface, close, playPause, rewind, timeline, forward, subtitles, audio, autoplay, diagnostics, panel, panelItem, appearance, appearanceFont, appearanceReset, appearanceBack, resume, startOver, coverFlow }
-    private enum PresentedPanel: Equatable { case subtitles, audio, subtitleAppearance }
+    private enum FocusTarget: Hashable { case surface, close, playPause, rewind, timeline, forward, subtitles, audio, skipSegments, autoplay, diagnostics, panel, panelItem, appearance, appearanceFont, appearanceReset, appearanceBack, resume, startOver, coverFlow }
+    private enum PresentedPanel: Equatable { case subtitles, audio, subtitleAppearance, skipSegments }
 
     @ObservedObject var coordinator: PlayerCoordinator
     let exitRequestID: Int
@@ -255,11 +255,19 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
                 if panel == .subtitleAppearance {
                     subtitleAppearancePanel
                         .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                } else if panel == .skipSegments {
+                    skipSegmentsPanel
+                        .transition(.opacity.combined(with: .move(edge: .trailing)))
                 } else {
                     trackPanel(panel)
                         .transition(.opacity.combined(with: .move(edge: .trailing)))
                 }
             }
+
+            SkipFeedbackView(coordinator: coordinator)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                .padding(.top, 150)
+                .padding(.trailing, 88)
 
             if let diagnostics {
                 PlaybackDiagnosticsPanel(snapshot: diagnostics, close: { setDiagnosticsEnabled(false) })
@@ -461,6 +469,14 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
                         .accessibilityIdentifier("player.audio")
                         .accessibilityValue(selectedAudioTitle)
                 }
+                Button(action: { openPanel(.skipSegments) }) {
+                    Label("Skip Opening & Ending", systemImage: "forward.frame.fill")
+                }
+                .buttonStyle(GlassIconButtonStyle(isActive: coordinator.skipSegments.isEnabled))
+                .focused($focus, equals: .skipSegments)
+                .accessibilityIdentifier("player.skip-segments")
+                .accessibilityValue(coordinator.skipSegments.isEnabled ? "On" : "Off")
+
                 Button(action: coordinator.toggleAutoPlay) {
                     Label("Autoplay next", systemImage: "forward.end.alt.fill")
                 }
@@ -718,6 +734,135 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
         return "As timed in the file"
     }
 
+    private var skipSegmentsPanel: some View {
+        let segments = coordinator.skipSegments
+        return VStack(alignment: .leading, spacing: 24) {
+            panelHeader("Skip Opening & Ending") {
+                Button("Close") { dismissPanel() }
+                    .buttonStyle(PillButtonStyle())
+                    .accessibilityIdentifier("player.skip-panel-close")
+            }
+            Text("Applies to every video in “\(coverFlowFolderTitle)”.")
+                .font(.system(size: 24, weight: .medium))
+                .foregroundStyle(.white.opacity(0.6))
+                .lineLimit(2)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    skipSection(
+                        title: "Opening",
+                        identifier: "opening",
+                        summary: segments.opening > 0 ? "Skip first \(timeText(segments.opening))" : "Off",
+                        detail: segments.opening > 0 ? "Videos start at \(timeText(segments.opening))" : "Videos start at the beginning",
+                        markTitle: "Opening ends at \(timeText(currentTime))",
+                        markDetail: SkipSegments.canMark(currentTime) ? nil : "More than \(timeText(SkipSegments.limit)) into the video",
+                        markFocus: .panel,
+                        mark: coordinator.markOpeningEnd,
+                        turnOff: { coordinator.setSkipOpening(0) },
+                        adjust: coordinator.adjustSkipOpening
+                    )
+                    skipSection(
+                        title: "Ending",
+                        identifier: "ending",
+                        summary: segments.ending > 0 ? "Skip last \(timeText(segments.ending))" : "Off",
+                        detail: skipEndingDetail(segments.ending),
+                        markTitle: "Ending starts at \(timeText(currentTime))",
+                        markDetail: SkipSegments.canMark(duration - currentTime) ? nil : "More than \(timeText(SkipSegments.limit)) before the end",
+                        markFocus: .panelItem,
+                        mark: coordinator.markEndingStart,
+                        turnOff: { coordinator.setSkipEnding(0) },
+                        adjust: coordinator.adjustSkipEnding
+                    )
+                }
+                .padding(.vertical, 8)
+            }
+            .scrollClipDisabled()
+        }
+        .padding(44)
+        .frame(width: 780)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .glassPanel(cornerRadius: 44)
+        .padding(40)
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .focusSection()
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("player.skip-panel")
+    }
+
+    @ViewBuilder
+    private func skipSection(
+        title: String,
+        identifier: String,
+        summary: String,
+        detail: String,
+        markTitle: String,
+        markDetail: String?,
+        markFocus: FocusTarget,
+        mark: @escaping () -> Void,
+        turnOff: @escaping () -> Void,
+        adjust: @escaping (TimeInterval) -> Void
+    ) -> some View {
+        sectionLabel(title)
+        HStack(spacing: 20) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(summary)
+                    .font(.system(size: 29, weight: .semibold).monospacedDigit())
+                Text(detail)
+                    .font(.system(size: 22, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .lineLimit(2)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("player.skip-\(identifier)")
+            .accessibilityValue(summary)
+            Spacer(minLength: 12)
+            Button("Off", action: turnOff)
+                .buttonStyle(ChoiceChipButtonStyle(isSelected: false))
+                .focused($focus, equals: .panelItem)
+                .accessibilityIdentifier("player.skip-\(identifier).off")
+        }
+        .padding(.horizontal, 24)
+        .padding(.bottom, 8)
+        .focusSection()
+        Button(action: mark) {
+            PanelRowLabel(icon: "mappin.and.ellipse", title: markTitle, detail: markDetail ?? "Use the current playback position", trailingIcon: nil)
+        }
+        .buttonStyle(RowButtonStyle())
+        // A mark past the limit would be saved as a different time.
+        .disabled(duration <= 0 || markDetail != nil)
+        .opacity(markDetail == nil ? 1 : 0.5)
+        .focused($focus, equals: markFocus)
+        .accessibilityIdentifier("player.skip-\(identifier).mark")
+        HStack(spacing: 16) {
+            ForEach(Self.skipSteps, id: \.self) { step in
+                Button(skipStepText(step)) { adjust(step) }
+                    .buttonStyle(ChoiceChipButtonStyle(isSelected: false))
+                    .focused($focus, equals: .panelItem)
+                    .accessibilityIdentifier("player.skip-\(identifier).\(step < 0 ? "shorter" : "longer")-\(Int(abs(step)))")
+                    .accessibilityLabel("\(Int(abs(step))) seconds \(step < 0 ? "shorter" : "longer")")
+            }
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 8)
+        .padding(.bottom, 8)
+        // Full width, so Down from the Off button above still lands here
+        // while the mark row between them is disabled.
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .focusSection()
+    }
+
+    private static var skipSteps: [TimeInterval] { [-10, -1, 1, 10] }
+
+    private func skipStepText(_ step: TimeInterval) -> String {
+        "\(step < 0 ? "−" : "+")\(Int(abs(step)))s"
+    }
+
+    private func skipEndingDetail(_ ending: TimeInterval) -> String {
+        guard ending > 0 else { return "Videos play to the end" }
+        guard coordinator.isAutoPlayEnabled else { return "Turn on Autoplay next to skip it" }
+        return "The next video starts \(timeText(ending)) before the end"
+    }
+
     private var subtitleAppearancePanel: some View {
         VStack(alignment: .leading, spacing: 30) {
             panelHeader("Subtitle Appearance") {
@@ -946,7 +1091,7 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
     /// from the header or timeline keeps its usual focus movement.
     private func opensCoverFlow(from target: FocusTarget?) -> Bool {
         switch target {
-        case nil, .surface, .playPause, .rewind, .forward, .subtitles, .audio, .autoplay, .diagnostics: true
+        case nil, .surface, .playPause, .rewind, .forward, .subtitles, .audio, .skipSegments, .autoplay, .diagnostics: true
         default: false
         }
     }
@@ -1134,7 +1279,11 @@ private struct ImmersivePlaybackStage<VideoContent: View>: View {
     }
 
     private func dismissPanel() {
-        let target: FocusTarget = presentedPanel == .audio ? .audio : .subtitles
+        let target: FocusTarget = switch presentedPanel {
+        case .audio: .audio
+        case .skipSegments: .skipSegments
+        default: .subtitles
+        }
         presentedPanel = nil
         focus = target
         scheduleChromeHideIfNeeded()
@@ -1236,6 +1385,27 @@ private struct AutoplayFeedbackView: View {
             }
         }
         .animation(.easeOut(duration: 0.2), value: coordinator.autoPlayFeedback)
+        .allowsHitTesting(false)
+    }
+}
+
+private struct SkipFeedbackView: View {
+    @ObservedObject var coordinator: PlayerCoordinator
+
+    var body: some View {
+        Group {
+            if let feedback = coordinator.skipFeedback {
+                Label(feedback, systemImage: "forward.frame.fill")
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 24)
+                    .frame(height: 56)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .accessibilityIdentifier("player.skip-feedback")
+            }
+        }
+        .animation(.easeOut(duration: 0.25), value: coordinator.skipFeedback)
         .allowsHitTesting(false)
     }
 }

@@ -50,6 +50,10 @@ final class PlayerCoordinator: ObservableObject {
     /// Playable files that share the current item's folder, in queue order.
     @Published private(set) var siblingMedia: [AListObject] = []
     @Published private(set) var siblingMediaState: SiblingMediaState = .idle
+    /// The opening and ending skipped in every video of the current folder.
+    @Published private(set) var skipSegments: SkipSegments = .none
+    /// A short note that the opening was just skipped.
+    @Published private(set) var skipFeedback: String?
     let subtitleOverlay = SubtitleOverlayModel()
 
     /// The player for the current file: `standardController` (VLC), or the
@@ -67,12 +71,14 @@ final class PlayerCoordinator: ObservableObject {
     private let progressStore: PlaybackProgressStore
     private let subtitleAppearanceStore: SubtitleAppearanceStore
     private let playbackSettingsStore: PlaybackSettingsStore
+    private let skipSegmentsStore: SkipSegmentsStore
     private let baseURL: URL
     private let username: String
     private let onUnauthorized: @MainActor () async -> Void
     private let onPlaybackStarted: @MainActor (AListObject) -> Void
     private let subtitleDataLoader: @Sendable (URL) async throws -> Data
     private let resumeCountdownInterval: Duration
+    private let skipCheckInterval: Duration
     private var currentObject: AListObject?
     private var sessionID = UUID()
     private var refreshCount = 0
@@ -88,6 +94,14 @@ final class PlayerCoordinator: ObservableObject {
     private var subtitleSelectionTask: Task<Void, Never>?
     private var siblingMediaTask: Task<Void, Never>?
     private var siblingMediaFolder: String?
+    private var skipSegmentsFolder: String?
+    private var skipTask: Task<Void, Never>?
+    private var skipFeedbackTask: Task<Void, Never>?
+    private var lastSkipCheckTime: TimeInterval?
+    /// The ending of this video was reached once; it is not skipped again.
+    private var hasReachedEnding = false
+    /// Set when the ending was skipped, so the video is saved as finished.
+    private var hasSkippedEnding = false
 
     init(
         api: any AListAPI,
@@ -96,12 +110,14 @@ final class PlayerCoordinator: ObservableObject {
         progressStore: PlaybackProgressStore,
         subtitleAppearanceStore: SubtitleAppearanceStore = SubtitleAppearanceStore(),
         playbackSettingsStore: PlaybackSettingsStore = PlaybackSettingsStore(),
+        skipSegmentsStore: SkipSegmentsStore = SkipSegmentsStore(),
         baseURL: URL,
         username: String,
         onUnauthorized: @escaping @MainActor () async -> Void = {},
         onPlaybackStarted: @escaping @MainActor (AListObject) -> Void = { _ in },
         subtitleDataLoader: @escaping @Sendable (URL) async throws -> Data = PlayerCoordinator.loadSubtitleData,
-        resumeCountdownInterval: Duration = .seconds(1)
+        resumeCountdownInterval: Duration = .seconds(1),
+        skipCheckInterval: Duration = .milliseconds(500)
     ) {
         self.api = api
         self.controller = controller
@@ -110,6 +126,7 @@ final class PlayerCoordinator: ObservableObject {
         self.progressStore = progressStore
         self.subtitleAppearanceStore = subtitleAppearanceStore
         self.playbackSettingsStore = playbackSettingsStore
+        self.skipSegmentsStore = skipSegmentsStore
         isAutoPlayEnabled = playbackSettingsStore.loadAutoPlayNext()
         subtitleAppearance = subtitleAppearanceStore.load()
         self.baseURL = baseURL
@@ -118,6 +135,7 @@ final class PlayerCoordinator: ObservableObject {
         self.onPlaybackStarted = onPlaybackStarted
         self.subtitleDataLoader = subtitleDataLoader
         self.resumeCountdownInterval = resumeCountdownInterval
+        self.skipCheckInterval = skipCheckInterval
         standardController.setSubtitleAppearance(subtitleAppearance)
         dolbyVisionController?.setSubtitleAppearance(subtitleAppearance)
     }
@@ -130,6 +148,8 @@ final class PlayerCoordinator: ObservableObject {
     deinit {
         eventTasks.values.forEach { $0.cancel() }
         progressTask?.cancel()
+        skipTask?.cancel()
+        skipFeedbackTask?.cancel()
         resumeTask?.cancel()
         autoPlayTask?.cancel()
         autoPlayFeedbackTask?.cancel()
@@ -162,6 +182,10 @@ final class PlayerCoordinator: ObservableObject {
         if siblingMediaFolder != AListPath.parent(of: path) {
             resetSiblingMedia()
         }
+        loadSkipSegments(folder: AListPath.parent(of: path))
+        hasReachedEnding = false
+        hasSkippedEnding = false
+        lastSkipCheckTime = nil
         sessionID = UUID()
         let activeSession = sessionID
         refreshCount = 0
@@ -186,7 +210,7 @@ final class PlayerCoordinator: ObservableObject {
             if let record = resumableProgress {
                 beginResumePrompt(position: record.position, duration: record.duration, session: activeSession)
             } else {
-                controller.play()
+                await playFromStart(session: activeSession)
             }
             discoverExternalSubtitles(session: activeSession, videoPath: path)
         } catch AListAPIError.unauthorized {
@@ -232,6 +256,24 @@ final class PlayerCoordinator: ObservableObject {
         resumeTask?.cancel()
         resumeTask = nil
         resumePrompt = nil
+        guard skipSegments.opening > 0 else {
+            controller.play()
+            return
+        }
+        let activeSession = sessionID
+        Task { @MainActor [weak self] in
+            await self?.playFromStart(session: activeSession)
+        }
+    }
+
+    /// Starts the current video past its folder's opening, if one is set.
+    private func playFromStart(session: UUID) async {
+        let opening = skipSegments.opening
+        if opening > 0 {
+            await controller.seek(to: opening)
+            guard sessionID == session, isPresented else { return }
+            showSkipFeedback("Skipped opening")
+        }
         controller.play()
     }
 
@@ -246,6 +288,9 @@ final class PlayerCoordinator: ObservableObject {
         autoPlayFeedbackTask?.cancel()
         autoPlayFeedbackTask = nil
         autoPlayFeedback = nil
+        skipFeedbackTask?.cancel()
+        skipFeedbackTask = nil
+        skipFeedback = nil
         autoPlayGeneration = UUID()
         resumePrompt = nil
         discoveryTask?.cancel()
@@ -263,6 +308,8 @@ final class PlayerCoordinator: ObservableObject {
         subtitleSelection = .off
         subtitleOverlay.clear()
         resetSiblingMedia()
+        skipSegmentsFolder = nil
+        skipSegments = .none
     }
 
     /// Lists the playable siblings of the current item once per folder; switching
@@ -431,7 +478,95 @@ final class PlayerCoordinator: ObservableObject {
 
     func saveProgress() {
         guard let identity = progressIdentity else { return }
-        progressStore.update(identity: identity, position: controller.currentTime, duration: controller.duration)
+        let position = hasSkippedEnding ? controller.duration : controller.currentTime
+        progressStore.update(identity: identity, position: position, duration: controller.duration)
+    }
+
+    // MARK: Skip opening and ending
+
+    /// Skips the first `seconds` of every video in this folder (0 turns it off).
+    func setSkipOpening(_ seconds: TimeInterval) {
+        updateSkipSegments { $0.opening = SkipSegments.clamped(seconds) }
+    }
+
+    /// Skips the last `seconds` of every video in this folder (0 turns it off).
+    func setSkipEnding(_ seconds: TimeInterval) {
+        updateSkipSegments { $0.ending = SkipSegments.clamped(seconds) }
+    }
+
+    /// Lengthens or shortens the opening from its current value, so presses
+    /// that arrive before the panel redraws still add up.
+    func adjustSkipOpening(by delta: TimeInterval) {
+        setSkipOpening(skipSegments.opening + delta)
+    }
+
+    func adjustSkipEnding(by delta: TimeInterval) {
+        setSkipEnding(skipSegments.ending + delta)
+    }
+
+    /// The opening ends here: videos in this folder start at this position.
+    func markOpeningEnd() {
+        setSkipOpening(controller.currentTime)
+    }
+
+    /// The ending starts here: videos in this folder move on this long before their end.
+    func markEndingStart() {
+        let duration = controller.duration
+        guard duration.isFinite, duration > 0 else { return }
+        setSkipEnding(duration - controller.currentTime)
+    }
+
+    private func updateSkipSegments(_ change: (inout SkipSegments) -> Void) {
+        guard let identity = skipSegmentsIdentity else { return }
+        var segments = skipSegments
+        change(&segments)
+        guard segments != skipSegments else { return }
+        skipSegments = segments
+        skipSegmentsStore.save(segments, for: identity)
+        // A new ending takes effect from where playback is, not behind it.
+        lastSkipCheckTime = nil
+    }
+
+    private func loadSkipSegments(folder: String) {
+        guard skipSegmentsFolder != folder else { return }
+        skipSegmentsFolder = folder
+        skipSegments = skipSegmentsIdentity.map(skipSegmentsStore.segments(for:)) ?? .none
+    }
+
+    private var skipSegmentsIdentity: SkipSegmentsIdentity? {
+        guard let folder = skipSegmentsFolder else { return nil }
+        return SkipSegmentsIdentity(baseURL: baseURL.absoluteString, username: username, folderPath: folder)
+    }
+
+    /// Moves on to the next video once playback runs into the ending. Only a
+    /// crossing during playback counts: seeking into the ending (to rewatch
+    /// it) plays it, and so does the last video in the folder.
+    private func checkEnding(session: UUID) {
+        guard sessionID == session, isPresented, state == .playing, resumePrompt == nil,
+              isAutoPlayEnabled, !hasReachedEnding, autoPlayTask == nil, controller.isPlaying else {
+            lastSkipCheckTime = nil
+            return
+        }
+        let time = controller.currentTime
+        defer { lastSkipCheckTime = time }
+        guard let start = skipSegments.endingStart(duration: controller.duration),
+              let last = lastSkipCheckTime,
+              last < start, time >= start,
+              time - last <= Self.maximumPlaybackStepBetweenChecks else { return }
+        hasReachedEnding = true
+        beginAutoPlay(session: session, skippingEnding: true)
+    }
+
+    private static let maximumPlaybackStepBetweenChecks: TimeInterval = 5
+
+    private func showSkipFeedback(_ message: String) {
+        skipFeedbackTask?.cancel()
+        skipFeedback = message
+        skipFeedbackTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            self?.skipFeedback = nil
+        }
     }
 
     private func beginResumePrompt(position: TimeInterval, duration: TimeInterval, session: UUID) {
@@ -570,21 +705,30 @@ final class PlayerCoordinator: ObservableObject {
                 self.saveProgress()
             }
         }
+        skipTask?.cancel()
+        let interval = skipCheckInterval
+        skipTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: interval)
+                guard !Task.isCancelled, let self, self.sessionID == session else { return }
+                self.checkEnding(session: session)
+            }
+        }
     }
 
-    private func beginAutoPlay(session: UUID) {
+    private func beginAutoPlay(session: UUID, skippingEnding: Bool = false) {
         guard autoPlayTask == nil else { return }
         let generation = UUID()
         autoPlayGeneration = generation
         autoPlayTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.advanceToNextMedia(session: session)
+            await self.advanceToNextMedia(session: session, skippingEnding: skippingEnding)
             guard self.autoPlayGeneration == generation else { return }
             self.autoPlayTask = nil
         }
     }
 
-    private func advanceToNextMedia(session: UUID) async {
+    private func advanceToNextMedia(session: UUID, skippingEnding: Bool = false) async {
         guard isAutoPlayEnabled, sessionID == session, isPresented, let currentObject else { return }
         do {
             guard let next = try await nextMedia(after: currentObject),
@@ -592,6 +736,7 @@ final class PlayerCoordinator: ObservableObject {
                   isAutoPlayEnabled,
                   sessionID == session,
                   isPresented else { return }
+            hasSkippedEnding = skippingEnding
             await play(object: next, isAutomaticTransition: true)
         } catch AListAPIError.unauthorized {
             guard !Task.isCancelled, sessionID == session else { return }
@@ -713,6 +858,8 @@ final class PlayerCoordinator: ObservableObject {
         if shouldSave { saveProgress() }
         progressTask?.cancel()
         progressTask = nil
+        skipTask?.cancel()
+        skipTask = nil
     }
 
     private var progressIdentity: PlaybackProgressIdentity? {

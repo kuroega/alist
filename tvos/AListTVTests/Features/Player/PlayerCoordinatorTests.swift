@@ -820,6 +820,154 @@ final class PlayerCoordinatorTests: XCTestCase {
         XCTAssertEqual(player.replacedURLs.last?.absoluteString, "https://media.example/reloaded")
     }
 
+    // MARK: Skip opening and ending
+
+    func testOpeningIsSkippedForEveryVideoInTheFolder() async throws {
+        let skipStore = SkipSegmentsStore(defaults: progressStoreDefaults())
+        let api = PlayerFakeAPI(details: [
+            detail(url: "https://media.example/episode-1", path: "/Show/Episode 1.mp4"),
+            detail(url: "https://media.example/episode-2", path: "/Show/Episode 2.mp4"),
+            detail(url: "https://media.example/movie", path: "/Movie.mp4")
+        ])
+        let player = PlayerFakeController()
+        let coordinator = makeCoordinator(api: api, player: player, skipSegmentsStore: skipStore)
+
+        await coordinator.play(object: object("/Show/Episode 1.mp4"))
+        XCTAssertTrue(player.seekValues.isEmpty)
+        player.currentTime = 89.6
+        coordinator.markOpeningEnd()
+        XCTAssertEqual(coordinator.skipSegments.opening, 90)
+
+        await coordinator.play(object: object("/Show/Episode 2.mp4"))
+        XCTAssertEqual(player.seekValues, [90])
+        XCTAssertEqual(player.playCount, 2)
+        XCTAssertEqual(coordinator.skipFeedback, "Skipped opening")
+
+        await coordinator.play(object: object("/Movie.mp4"))
+        XCTAssertEqual(coordinator.skipSegments, .none, "another folder keeps its own setting")
+        XCTAssertEqual(player.seekValues, [90])
+        XCTAssertEqual(skipStore.segments(for: SkipSegmentsIdentity(baseURL: "https://alist.example", username: "alice", folderPath: "/Show")).opening, 90)
+    }
+
+    func testStartingFromBeginningAfterResumePromptSkipsOpening() async throws {
+        let suite = "PlayerCoordinatorTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let store = PlaybackProgressStore(defaults: defaults)
+        store.update(identity: PlaybackProgressIdentity(baseURL: "https://alist.example", username: "alice", virtualPath: "/Show/Episode 1.mp4"), position: 60, duration: 200)
+        let skipStore = SkipSegmentsStore(defaults: progressStoreDefaults())
+        skipStore.save(SkipSegments(opening: 45, ending: 0), for: SkipSegmentsIdentity(baseURL: "https://alist.example", username: "alice", folderPath: "/Show"))
+        let api = PlayerFakeAPI(details: [detail(url: "https://media.example/episode-1", path: "/Show/Episode 1.mp4")])
+        let player = PlayerFakeController()
+        let coordinator = makeCoordinator(api: api, player: player, store: store, skipSegmentsStore: skipStore)
+
+        await coordinator.play(object: object("/Show/Episode 1.mp4"))
+        XCTAssertNotNil(coordinator.resumePrompt)
+        coordinator.startFromBeginning()
+        try await waitUntil { player.playCount == 1 }
+
+        XCTAssertEqual(player.seekValues, [45])
+    }
+
+    func testEndingMovesToNextVideoAndMarksTheSkippedOneWatched() async throws {
+        let suite = "PlayerCoordinatorTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let store = PlaybackProgressStore(defaults: defaults)
+        let api = PlayerFakeAPI(
+            details: [
+                detail(url: "https://media.example/episode-1", path: "/Episode 1.mp4"),
+                detail(url: "https://media.example/episode-2", path: "/Episode 2.mp4")
+            ],
+            repeatingListByPath: ["/": [[
+                object("/Episode 1.mp4", type: AListFileType.video.rawValue),
+                object("/Episode 2.mp4", type: AListFileType.video.rawValue)
+            ]]]
+        )
+        let player = PlayerFakeController()
+        player.duration = 1_000
+        let coordinator = makeCoordinator(api: api, player: player, store: store)
+
+        await coordinator.play(object: object("/Episode 1.mp4", type: AListFileType.video.rawValue))
+        coordinator.setSkipEnding(150)
+        player.currentTime = 849
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(player.replacedURLs.count, 1)
+
+        player.currentTime = 850.5
+        try await waitUntil { player.replacedURLs.count == 2 }
+
+        XCTAssertEqual(coordinator.nowPlayingPath, "/Episode 2.mp4")
+        let episode1 = PlaybackProgressIdentity(baseURL: "https://alist.example", username: "alice", virtualPath: "/Episode 1.mp4")
+        XCTAssertNil(store.record(for: episode1))
+        XCTAssertEqual(store.watchedRecords().map(\.identity), [episode1])
+    }
+
+    func testStepsAddUpFromTheCurrentValue() async {
+        let api = PlayerFakeAPI(details: [detail(url: "https://media.example/episode-1", path: "/Show/Episode 1.mp4")])
+        let coordinator = makeCoordinator(api: api, player: PlayerFakeController())
+        await coordinator.play(object: object("/Show/Episode 1.mp4"))
+
+        coordinator.adjustSkipEnding(by: 10)
+        coordinator.adjustSkipEnding(by: 10)
+        coordinator.adjustSkipEnding(by: 10)
+        coordinator.adjustSkipOpening(by: -10)
+
+        XCTAssertEqual(coordinator.skipSegments, SkipSegments(opening: 0, ending: 30))
+    }
+
+    func testSeekingIntoTheEndingPlaysIt() async throws {
+        let api = PlayerFakeAPI(
+            details: [
+                detail(url: "https://media.example/episode-1", path: "/Episode 1.mp4"),
+                detail(url: "https://media.example/episode-2", path: "/Episode 2.mp4")
+            ],
+            repeatingListByPath: ["/": [[
+                object("/Episode 1.mp4", type: AListFileType.video.rawValue),
+                object("/Episode 2.mp4", type: AListFileType.video.rawValue)
+            ]]]
+        )
+        let player = PlayerFakeController()
+        player.duration = 1_000
+        let coordinator = makeCoordinator(api: api, player: player)
+
+        await coordinator.play(object: object("/Episode 1.mp4", type: AListFileType.video.rawValue))
+        coordinator.setSkipEnding(150)
+        player.currentTime = 300
+        try await Task.sleep(for: .milliseconds(50))
+        player.currentTime = 900
+        try await Task.sleep(for: .milliseconds(80))
+
+        XCTAssertEqual(player.replacedURLs.count, 1)
+        XCTAssertEqual(coordinator.nowPlayingPath, "/Episode 1.mp4")
+    }
+
+    func testEndingIsNotSkippedWithAutoplayOff() async throws {
+        let api = PlayerFakeAPI(
+            details: [
+                detail(url: "https://media.example/episode-1", path: "/Episode 1.mp4"),
+                detail(url: "https://media.example/episode-2", path: "/Episode 2.mp4")
+            ],
+            repeatingListByPath: ["/": [[
+                object("/Episode 1.mp4", type: AListFileType.video.rawValue),
+                object("/Episode 2.mp4", type: AListFileType.video.rawValue)
+            ]]]
+        )
+        let player = PlayerFakeController()
+        player.duration = 1_000
+        let coordinator = makeCoordinator(api: api, player: player)
+        coordinator.isAutoPlayEnabled = false
+
+        await coordinator.play(object: object("/Episode 1.mp4", type: AListFileType.video.rawValue))
+        coordinator.setSkipEnding(150)
+        player.currentTime = 849
+        try await Task.sleep(for: .milliseconds(50))
+        player.currentTime = 851
+        try await Task.sleep(for: .milliseconds(80))
+
+        XCTAssertEqual(player.replacedURLs.count, 1)
+    }
+
     private func makeCoordinator(
         api: PlayerFakeAPI,
         player: PlayerFakeController,
@@ -827,7 +975,8 @@ final class PlayerCoordinatorTests: XCTestCase {
         store: PlaybackProgressStore? = nil,
         onPlaybackStarted: @escaping @MainActor (AListObject) -> Void = { _ in },
         subtitleDataLoader: @escaping @Sendable (URL) async throws -> Data = { url in try nativeSubtitleData(for: url) },
-        resumeCountdownInterval: Duration = .seconds(1)
+        resumeCountdownInterval: Duration = .seconds(1),
+        skipSegmentsStore: SkipSegmentsStore? = nil
     ) -> PlayerCoordinator {
         let progressStore: PlaybackProgressStore
         if let store {
@@ -848,11 +997,13 @@ final class PlayerCoordinatorTests: XCTestCase {
             progressStore: progressStore,
             subtitleAppearanceStore: SubtitleAppearanceStore(defaults: progressStoreDefaults()),
             playbackSettingsStore: PlaybackSettingsStore(defaults: settingsDefaults),
+            skipSegmentsStore: skipSegmentsStore ?? SkipSegmentsStore(defaults: progressStoreDefaults()),
             baseURL: URL(string: "https://alist.example")!,
             username: "alice",
             onPlaybackStarted: onPlaybackStarted,
             subtitleDataLoader: subtitleDataLoader,
-            resumeCountdownInterval: resumeCountdownInterval
+            resumeCountdownInterval: resumeCountdownInterval,
+            skipCheckInterval: .milliseconds(10)
         )
     }
 

@@ -176,6 +176,7 @@ final class AppContainer: ObservableObject {
             progressStore: playbackProgressStore,
             subtitleAppearanceStore: subtitleAppearanceStore,
             playbackSettingsStore: playbackSettingsStore,
+            skipSegmentsStore: SkipSegmentsStore(defaults: appStorage),
             baseURL: connection.baseURL,
             username: connection.username,
             onUnauthorized: { [weak self] in self?.handleUnauthorized() },

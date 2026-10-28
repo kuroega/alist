@@ -548,6 +548,54 @@ final class AListTVUITests: XCTestCase {
             file: file, line: line
         )
     }
+    func testSkipOpeningAndEndingJourney() {
+        openFixturePlayer()
+        // The down press in openFixturePlayer can open the folder shelf,
+        // which hides the transport row.
+        if app.buttons["player.cover-flow"].exists { remote.press(.menu) }
+        let skip = app.buttons["player.skip-segments"]
+        if !skip.waitForExistence(timeout: 1) { remote.press(.up) }
+        XCTAssertTrue(skip.waitForExistence(timeout: 3))
+        focus(skip, direction: .right)
+        remote.press(.select)
+
+        let panel = app.descendants(matching: .any)["player.skip-panel"]
+        XCTAssertTrue(panel.waitForExistence(timeout: 3))
+        let opening = app.descendants(matching: .any)["player.skip-opening"]
+        let ending = app.descendants(matching: .any)["player.skip-ending"]
+        XCTAssertEqual(opening.value as? String, "Off")
+        XCTAssertEqual(ending.value as? String, "Off")
+
+        // The fixture sits at 0:45 of 2:00.
+        let markOpening = app.buttons["player.skip-opening.mark"]
+        waitForFocus(markOpening)
+        remote.press(.select)
+        XCTAssertEqual(opening.value as? String, "Skip first 00:45")
+
+        let longer = app.buttons["player.skip-opening.longer-10"]
+        focusSpatially(longer)
+        remote.press(.select)
+        XCTAssertEqual(opening.value as? String, "Skip first 00:55")
+
+        let markEnding = app.buttons["player.skip-ending.mark"]
+        focusSpatially(markEnding)
+        remote.press(.select)
+        XCTAssertEqual(ending.value as? String, "Skip last 01:15")
+        attachScreenshot(named: "skip-panel")
+
+        // Quick presses must add up rather than repeat one step.
+        let endingLonger = app.buttons["player.skip-ending.longer-1"]
+        focusSpatially(endingLonger)
+        remote.press(.select)
+        remote.press(.select)
+        remote.press(.select)
+        XCTAssertEqual(ending.value as? String, "Skip last 01:18")
+
+        remote.press(.menu)
+        let closed = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: panel)
+        wait(for: [closed], timeout: 3)
+    }
+
     func testDiagnosticsToggleJourney() {
         openFixturePlayer()
         let toggle = app.buttons["player.diagnostics-toggle"]
