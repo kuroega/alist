@@ -20,9 +20,10 @@ final class LibraryScannerTests: XCTestCase {
     }
 
     @discardableResult
-    private func scan(_ mode: LibraryScanner.Mode, excluded: [String] = [], recorder: ScanRecorder = ScanRecorder()) async throws -> LibraryScanResult {
+    private func scan(_ mode: LibraryScanner.Mode, excluded: [String] = [], bypassServerCache: Bool = false, recorder: ScanRecorder = ScanRecorder()) async throws -> LibraryScanResult {
         var scanner = LibraryScanner(api: server, database: database)
         scanner.excluded = excluded
+        scanner.bypassServerCache = bypassServerCache
         let result = try await scanner.scan(roots: roots, mode: mode, progress: { _ in }, changes: { recorder.record($0) })
         await database.flush()
         return result
@@ -90,6 +91,28 @@ final class LibraryScannerTests: XCTestCase {
         XCTAssertFalse(listed.contains("/Movies/Arrival (2016)"))
         XCTAssertEqual(Set(recorder.upserted.keys), ["/TV/Dark/Season 1/Dark.S01E03.mkv"])
         XCTAssertEqual(recorder.upserted["/TV/Dark/Season 1/Dark.S01E03.mkv"]?.parsed.episode, 3)
+        let stored = await storedPaths()
+        XCTAssertEqual(stored, allVideos.union(["/TV/Dark/Season 1/Dark.S01E03.mkv"]))
+    }
+
+    func testBypassingTheServerCacheFindsVideosItStillHides() async throws {
+        await server.setCachesListings(true)
+        try await scan(.quick)
+        // Added outside AList: its cached listings still show the old folder.
+        await server.setFolder("/TV/Dark", [GalleryFixtures.folder("/TV/Dark/Season 1", modified: "2026-03-01T00:00:00Z")])
+        await server.setFolder("/TV/Dark/Season 1", [
+            GalleryFixtures.video("/TV/Dark/Season 1/Dark.S01E01.mkv"),
+            GalleryFixtures.video("/TV/Dark/Season 1/Dark.S01E02.mkv"),
+            GalleryFixtures.video("/TV/Dark/Season 1/Dark.S01E03.mkv")
+        ])
+
+        let cached = ScanRecorder()
+        try await scan(.quick, recorder: cached)
+        XCTAssertTrue(cached.upserted.isEmpty)
+
+        let refreshed = ScanRecorder()
+        try await scan(.quick, bypassServerCache: true, recorder: refreshed)
+        XCTAssertEqual(Set(refreshed.upserted.keys), ["/TV/Dark/Season 1/Dark.S01E03.mkv"])
         let stored = await storedPaths()
         XCTAssertEqual(stored, allVideos.union(["/TV/Dark/Season 1/Dark.S01E03.mkv"]))
     }

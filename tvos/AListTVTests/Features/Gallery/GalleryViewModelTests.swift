@@ -94,6 +94,28 @@ final class GalleryViewModelTests: XCTestCase {
         XCTAssertFalse(second.isScanning)
     }
 
+    func testUpdateLibraryFindsEpisodesTheServerCacheStillHides() async throws {
+        let server = FakeLibraryServer()
+        await GalleryFixtures.populate(server)
+        await server.setCachesListings(true)
+        let store = GalleryLibraryStore(baseURL: baseURL, username: "alice", defaults: defaults, directory: directory)
+        store.setRoots(["/Movies", "/TV"])
+        let viewModel = makeViewModel(server: server, store: store, progress: PlaybackProgressStore(defaults: defaults))
+        viewModel.onAppear()
+        await waitUntil { viewModel.phase == .ready && viewModel.lastScan != nil }
+        XCTAssertEqual(viewModel.catalog.videoCount, 4)
+
+        // Added outside AList, so the server's cached listings don't show it yet.
+        await server.setFolder("/TV/Dark", [GalleryFixtures.folder("/TV/Dark/Season 1", modified: "2026-03-01T00:00:00Z")])
+        await server.setFolder("/TV/Dark/Season 1", [
+            GalleryFixtures.video("/TV/Dark/Season 1/Dark.S01E01.mkv"),
+            GalleryFixtures.video("/TV/Dark/Season 1/Dark.S01E02.mkv"),
+            GalleryFixtures.video("/TV/Dark/Season 1/Dark.S01E03.mkv")
+        ])
+        viewModel.updateLibrary()
+        await waitUntil { viewModel.phase == .ready && viewModel.catalog.videoCount == 5 }
+    }
+
     func testChangingLibraryFoldersDropsVideosOutsideThemImmediately() async throws {
         let server = FakeLibraryServer()
         await GalleryFixtures.populate(server)

@@ -245,28 +245,31 @@ final class GalleryViewModel: ObservableObject {
 
     /// Picks up what changed on the server since the last scan, listing only
     /// folders that may have changed.
-    func updateLibrary() { requestScan(.quick) }
+    func updateLibrary() { requestScan(.quick, bypassServerCache: true) }
 
     /// Lists every library folder again. Titles already matched are kept;
     /// only new ones are looked up on TMDB.
-    func rescanAllFolders() { requestScan(.full) }
+    func rescanAllFolders() { requestScan(.full, bypassServerCache: true) }
 
-    private func requestScan(_ mode: LibraryScanner.Mode) {
+    /// Scans the viewer asks for read past the server's listing cache, so
+    /// files added outside AList show up now rather than when it expires.
+    private func requestScan(_ mode: LibraryScanner.Mode, bypassServerCache: Bool = false) {
         guard isLoaded else {
             // The stored library loads first and scans when it finishes.
             startLoading()
             return
         }
-        startScan(mode)
+        startScan(mode, bypassServerCache: bypassServerCache)
     }
 
-    private func startScan(_ mode: LibraryScanner.Mode) {
+    private func startScan(_ mode: LibraryScanner.Mode, bypassServerCache: Bool = false) {
         scanTask?.cancel()
         scanGeneration += 1
         let generation = scanGeneration
         let roots = roots
         var scanner = LibraryScanner(api: api, database: database)
         scanner.excluded = excluded
+        scanner.bypassServerCache = bypassServerCache
         libraryIssue = nil
         phase = .scanning(LibraryScanProgress(foldersScanned: 0, videosFound: 0, currentFolder: roots.first ?? "/"))
         let progress: @Sendable (LibraryScanProgress) async -> Void = { [weak self] progress in
@@ -430,9 +433,13 @@ final class GalleryViewModel: ObservableObject {
 
     /// Looks one title up on TMDB again, ignoring its stored match and every
     /// cached response, then fetches its details and seasons afresh. For a
-    /// wrong match, or artwork and details TMDB has changed since.
+    /// wrong match, or artwork and details TMDB has changed since. The
+    /// folders holding the title are listed again too, so episodes added
+    /// since the last scan show up.
     func refreshMetadata(for title: GalleryTitle) {
         guard let tmdb, !refreshingTitles.contains(title) else { return }
+        for folder in Set(paths(for: title).map(AListPath.parent(of:))) { database.forgetListing(of: folder) }
+        requestScan(.quick, bypassServerCache: true)
         // Every spelling the title's files were looked up under, with the
         // seasons its episodes belong to.
         var lookups: [String: ParsedMedia] = [:]
