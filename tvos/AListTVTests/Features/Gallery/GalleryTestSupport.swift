@@ -7,6 +7,9 @@ actor FakeLibraryServer: AListAPI {
     private var folders: [String: [AListObject]] = [:]
     private var unreadable = Set<String>()
     private(set) var listed: [String] = []
+    /// Like AList, answer from the last listing of a folder unless asked to refresh.
+    private var cachesListings = false
+    private var cache: [String: [AListObject]] = [:]
 
     func setFolder(_ path: String, _ children: [AListObject]) { folders[path] = children }
     func removeFolder(_ path: String) { folders[path] = nil }
@@ -14,6 +17,7 @@ actor FakeLibraryServer: AListAPI {
         if isUnreadable { unreadable.insert(path) } else { unreadable.remove(path) }
     }
     func resetListed() { listed = [] }
+    func setCachesListings(_ caches: Bool) { cachesListings = caches }
 
     func login(username: String, password: String, otpCode: String?) async throws -> LoginData { throw AListAPIError.invalidResponse }
     func currentUser() async throws -> CurrentUser { throw AListAPIError.invalidResponse }
@@ -45,7 +49,11 @@ actor FakeLibraryServer: AListAPI {
     func list(path: String, page: Int, perPage: Int, refresh: Bool) async throws -> DirectoryPage {
         listed.append(path)
         if unreadable.contains(path) { throw AListAPIError.transport(message: "Folder is offline") }
+        if cachesListings, !refresh, let cached = cache[path] {
+            return DirectoryPage(content: cached, hasMore: false, page: page, perPage: perPage)
+        }
         guard let content = folders[path] else { throw AListAPIError.server(code: 500, message: "object not found") }
+        cache[path] = content
         return DirectoryPage(content: content, hasMore: false, page: page, perPage: perPage)
     }
 }

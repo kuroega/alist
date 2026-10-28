@@ -82,6 +82,10 @@ struct LibraryScanner: Sendable {
     var maxDepth = 12
     var maxFolders = 40_000
     var concurrency = 4
+    /// Asks the server to list each folder afresh instead of answering from
+    /// its listing cache, which can hide files added outside AList for as
+    /// long as the storage's cache lasts.
+    var bypassServerCache = false
     /// Changes gathered before they are handed over (also flushed every second).
     var changeBatch = 250
 
@@ -278,7 +282,8 @@ struct LibraryScanner: Sendable {
         var page = 1
         do {
             while true {
-                let result = try await api.list(path: path, page: page, perPage: 200)
+                // Only the first page refreshes; later pages read the listing it cached.
+                let result = try await api.list(path: path, page: page, perPage: 200, refresh: bypassServerCache && page == 1)
                 items += result.content
                 let hasMore = result.hasMore ?? (result.content.count == 200)
                 guard hasMore, page < 100 else { break }
