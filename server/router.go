@@ -35,6 +35,7 @@ func Init(e *gin.Engine) {
 	g.GET("/i/:link_name", handles.Plist)
 	common.SecretKey = []byte(conf.Conf.JwtSecret)
 	g.Use(middlewares.StoragesLoaded)
+	handles.InitPlayback()
 	if conf.Conf.MaxConnections > 0 {
 		g.Use(middlewares.MaxAllowed(conf.Conf.MaxConnections))
 	}
@@ -47,6 +48,8 @@ func Init(e *gin.Engine) {
 	g.GET("/p/*path", signCheck, downloadLimiter, handles.Proxy)
 	g.HEAD("/d/*path", signCheck, handles.Down)
 	g.HEAD("/p/*path", signCheck, handles.Proxy)
+	g.GET("/playback/:id/:resource", downloadLimiter, handles.Playback)
+	g.HEAD("/playback/:id/:resource", handles.Playback)
 	g.GET("/s/:share_id", handles.GetSharePage)
 	g.GET("/s/:share_id/*path", handles.GetSharePage)
 	g.GET("/sd/:share_id", downloadLimiter, handles.ShareDown)

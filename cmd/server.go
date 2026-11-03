@@ -22,6 +22,7 @@ import (
 	"github.com/alist-org/alist/v3/internal/fs"
 	"github.com/alist-org/alist/v3/pkg/utils"
 	"github.com/alist-org/alist/v3/server"
+	"github.com/alist-org/alist/v3/server/handles"
 	mcpserver "github.com/alist-org/alist/v3/server/mcp"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
@@ -50,7 +51,14 @@ the address is defined in config file`,
 			gin.SetMode(gin.ReleaseMode)
 		}
 		r := gin.New()
-		r.Use(gin.LoggerWithWriter(log.StandardLogger().Out), gin.RecoveryWithWriter(log.StandardLogger().Out))
+		r.Use(gin.LoggerWithConfig(gin.LoggerConfig{
+			Output: log.StandardLogger().Out,
+			// Playback URLs are bearer capabilities. Internal media reads also
+			// carry download signatures; neither belongs in access logs.
+			Skip: func(c *gin.Context) bool {
+				return c.GetBool("private_playback")
+			},
+		}), gin.RecoveryWithWriter(log.StandardLogger().Out))
 		server.Init(r)
 		var httpHandler http.Handler = r
 		if conf.Conf.Scheme.EnableH2c {
@@ -182,6 +190,7 @@ the address is defined in config file`,
 		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 		<-quit
 		utils.Log.Println("Shutdown server...")
+		handles.ClosePlayback()
 		fs.ArchiveContentUploadTaskManager.RemoveAll()
 		frp.Instance.Stop()
 		Release()

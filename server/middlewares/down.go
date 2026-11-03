@@ -1,6 +1,7 @@
 package middlewares
 
 import (
+	"net"
 	"net/url"
 	"strings"
 
@@ -20,6 +21,12 @@ func Down(verifyFunc func(string, string) error) func(c *gin.Context) {
 	return func(c *gin.Context) {
 		rawPath := parsePath(c.Param("path"))
 		c.Set("path", rawPath)
+		if c.Query("internal_playback") == "1" {
+			host, _, _ := net.SplitHostPort(c.Request.RemoteAddr)
+			if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+				c.Set("private_playback", true)
+			}
+		}
 		meta, err := op.GetNearestMeta(rawPath)
 		if err != nil {
 			if !errors.Is(errors.Cause(err), errs.MetaNotFound) {

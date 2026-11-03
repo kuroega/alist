@@ -1,8 +1,10 @@
 package static
 
 import (
+	_ "embed"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"io/fs"
 	"net/http"
@@ -17,6 +19,9 @@ import (
 )
 
 var static fs.FS
+
+//go:embed playback.js
+var playbackScript []byte
 
 func initStatic() {
 	if conf.Conf.DistDir == "" {
@@ -62,6 +67,19 @@ func UpdateIndex() {
 	title := setting.GetStr(conf.SiteTitle)
 	customizeHead := setting.GetStr(conf.CustomizeHead)
 	customizeBody := setting.GetStr(conf.CustomizeBody)
+	if conf.Conf.Playback.Enabled {
+		base := strings.TrimSuffix(conf.URL.Path, "/")
+		hlsURL := ""
+		assets, _ := fs.Glob(static, "assets/hls-*.js")
+		for _, asset := range assets {
+			if !strings.Contains(asset, "-legacy") {
+				hlsURL = base + "/" + asset
+				break
+			}
+		}
+		customizeBody += `<script defer src="` + html.EscapeString(base+"/playback-client.js") +
+			`" data-hls-url="` + html.EscapeString(hlsURL) + `"></script>`
+	}
 	mainColor := setting.GetStr(conf.MainColor)
 	conf.ManageHtml = conf.RawIndexHtml
 	replaceMap1 := map[string]string{
@@ -85,6 +103,10 @@ func UpdateIndex() {
 func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 	initStatic()
 	initIndex()
+	r.GET("/playback-client.js", func(c *gin.Context) {
+		c.Header("Cache-Control", "no-cache")
+		c.Data(http.StatusOK, "text/javascript; charset=utf-8", playbackScript)
+	})
 	folders := []string{"assets", "images", "streamer", "static"}
 	r.Use(func(c *gin.Context) {
 		for i := range folders {

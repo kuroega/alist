@@ -345,12 +345,16 @@ type FsGetReq struct {
 
 type FsGetResp struct {
 	ObjResp
-	RawURL   string         `json:"raw_url"`
-	Readme   string         `json:"readme"`
-	Header   string         `json:"header"`
-	Provider string         `json:"provider"`
-	WebProxy bool           `json:"web_proxy"`
-	Related  []ObjLabelResp `json:"related"`
+	RawURL      string `json:"raw_url"`
+	OriginalURL string `json:"original_url,omitempty"`
+	// DolbyVision is set when raw_url is a compatible stream that drops
+	// Dolby Vision metadata the source needs for correct color.
+	DolbyVision *DolbyVisionPlayback `json:"dolby_vision,omitempty"`
+	Readme      string               `json:"readme"`
+	Header      string               `json:"header"`
+	Provider    string               `json:"provider"`
+	WebProxy    bool                 `json:"web_proxy"`
+	Related     []ObjLabelResp       `json:"related"`
 }
 
 func FsGet(c *gin.Context) {
@@ -442,6 +446,13 @@ func FsGet(c *gin.Context) {
 			}
 		}
 	}
+	originalURL := ""
+	var dolbyVision *DolbyVisionPlayback
+	if !obj.IsDir() && storageErr == nil && canProxy(storage, obj.GetName()) {
+		if compatibleURL, dv, playbackErr := compatiblePlaybackURL(c, user, reqPath, obj); playbackErr == nil && compatibleURL != "" {
+			originalURL, rawURL, dolbyVision = rawURL, compatibleURL, dv
+		}
+	}
 	var related []model.Obj
 	parentPath := stdpath.Dir(reqPath)
 	sameLevelFiles, err := fs.List(c, parentPath, &fs.ListArgs{})
@@ -468,12 +479,14 @@ func FsGet(c *gin.Context) {
 			Thumb:        thumb,
 			StorageClass: storageClass,
 		},
-		RawURL:   rawURL,
-		Readme:   getReadme(meta, reqPath),
-		Header:   getHeader(meta, reqPath),
-		Provider: provider,
-		WebProxy: storageErr == nil && storage.GetStorage().WebProxy,
-		Related:  toObjsResp(related, parentPath, isEncrypt(parentMeta, parentPath)),
+		RawURL:      rawURL,
+		OriginalURL: originalURL,
+		DolbyVision: dolbyVision,
+		Readme:      getReadme(meta, reqPath),
+		Header:      getHeader(meta, reqPath),
+		Provider:    provider,
+		WebProxy:    storageErr == nil && storage.GetStorage().WebProxy,
+		Related:     toObjsResp(related, parentPath, isEncrypt(parentMeta, parentPath)),
 	})
 }
 

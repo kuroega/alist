@@ -1,0 +1,317 @@
+package playback
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func TestSourceCacheCoalescesRangesAndSurvivesRestart(t *testing.T) {
+	data := []byte("abcdefghijklmnopqrstuvwxyz")
+	var requests atomic.Int32
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		time.Sleep(20 * time.Millisecond)
+		http.ServeContent(w, r, "source.mkv", time.Time{}, bytes.NewReader(data))
+	}))
+	cacheDir := t.TempDir()
+	store, err := newSourceStore(cacheDir, 64, 8, origin.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Count only the chunks this range needs; read-ahead is covered below.
+	store.prefetchChunks = 0
+	entry, err := store.acquire("movie:revision", origin.URL, int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			got := make([]byte, 4)
+			_, err := entry.ReadAt(context.Background(), got, 2)
+			if err == nil && !bytes.Equal(got, data[2:6]) {
+				err = fmt.Errorf("got %q", got)
+			}
+			results <- err
+		}()
+	}
+	close(start)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("concurrent cache miss made %d source requests, want 1", got)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/source", nil)
+	req.Header.Set("Range", "bytes=6-13")
+	response := httptest.NewRecorder()
+	if err := entry.serve(response, req); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusPartialContent || response.Header().Get("Content-Range") != "bytes 6-13/26" ||
+		!bytes.Equal(response.Body.Bytes(), data[6:14]) {
+		t.Fatalf("invalid cached range: status=%d range=%q body=%q", response.Code, response.Header().Get("Content-Range"), response.Body.Bytes())
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("cross-chunk range made %d source requests, want 2", got)
+	}
+	store.release(entry)
+	origin.Close()
+
+	restarted, err := newSourceStore(cacheDir, 64, 8, http.DefaultClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := restarted.acquire("movie:revision", "http://127.0.0.1:1/unreachable", int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, 16)
+	if _, err := persisted.ReadAt(context.Background(), got, 0); err != nil || !bytes.Equal(got, data[:16]) {
+		t.Fatalf("persisted cache read: %q %v", got, err)
+	}
+	restarted.release(persisted)
+}
+
+func TestSourceStreamPrefetchesAheadOnceChunkIsReady(t *testing.T) {
+	// Eight full chunks and a short ninth.
+	data := append(bytes.Repeat([]byte("0123456789abcdef"), 4), "xy"...)
+	var mu sync.Mutex
+	var ranges []string
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		ranges = append(ranges, r.Header.Get("Range"))
+		mu.Unlock()
+		http.ServeContent(w, r, "source.mkv", time.Time{}, bytes.NewReader(data))
+	}))
+	defer origin.Close()
+	store, err := newSourceStore(t.TempDir(), 1024, 8, origin.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := store.acquire("movie:ahead", origin.URL, int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.release(entry)
+
+	// A read that stays inside chunk 1, far from its end, still starts the
+	// next two chunks: waiting for the chunk's last bytes left no lead time.
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/source", nil)
+	req.Header.Set("Range", "bytes=9-10")
+	if err := entry.serve(httptest.NewRecorder(), req); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		entry.mu.Lock()
+		ready := entry.ready[2] != "" && entry.ready[3] != ""
+		entry.mu.Unlock()
+		if ready {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("chunks 2 and 3 were not prefetched")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Give a stray fetch of chunk 4 time to show up before counting.
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"bytes=8-15", "bytes=16-23", "bytes=24-31"}
+	got := append([]string(nil), ranges...)
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("source ranges = %v, want %v", got, want)
+	}
+}
+
+func TestSourceCacheRejectsTruncatedChunk(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Range", "bytes 0-7/8")
+		w.Header().Set("Content-Length", "8")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = io.WriteString(w, "short")
+	}))
+	defer origin.Close()
+	store, err := newSourceStore(t.TempDir(), 8, 8, origin.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := store.acquire("movie", origin.URL, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.ReadAt(context.Background(), make([]byte, 1), 0); !errors.Is(err, errRange) {
+		t.Fatalf("truncated source returned %v", err)
+	}
+	if entry.record.bytes != 0 || store.usedBytes != 0 {
+		t.Fatal("truncated chunk consumed cache capacity")
+	}
+	store.release(entry)
+}
+
+func TestSourceCacheRetriesTransientChunkFailure(t *testing.T) {
+	data := []byte("0123456789abcdef")
+	var attempts atomic.Int32
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) <= 2 {
+			http.Error(w, "temporary upstream failure", http.StatusBadGateway)
+			return
+		}
+		http.ServeContent(w, r, "source.mkv", time.Time{}, bytes.NewReader(data))
+	}))
+	defer origin.Close()
+	store, err := newSourceStore(t.TempDir(), 64, int64(len(data)), origin.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := store.acquire("movie:retry", origin.URL, int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.release(entry)
+	buf := make([]byte, len(data))
+	if n, err := entry.ReadAt(context.Background(), buf, 0); err != nil || n != len(data) || !bytes.Equal(buf, data) {
+		t.Fatalf("transient source failure was not retried: n=%d err=%v", n, err)
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("source attempts = %d, want 3", got)
+	}
+}
+
+func TestSourceCacheChunkOutlivesCancelledReader(t *testing.T) {
+	data := []byte("0123456789abcdef")
+	var requests atomic.Int32
+	arrived := make(chan struct{}, 1)
+	unblock := make(chan struct{})
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		arrived <- struct{}{}
+		select {
+		case <-unblock:
+		case <-r.Context().Done():
+			return
+		}
+		http.ServeContent(w, r, "source.mkv", time.Time{}, bytes.NewReader(data))
+	}))
+	defer origin.Close()
+	store, err := newSourceStore(t.TempDir(), 64, int64(len(data)), origin.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := store.acquire("movie:slow", origin.URL, int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.release(entry)
+
+	// ffmpeg gives up on a slow cold chunk and drops its loopback connection.
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := entry.ReadAt(ctx, make([]byte, 4), 0)
+		result <- err
+	}()
+	<-arrived
+	cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled reader returned %v", err)
+	}
+
+	// The download continues, so the retry waits for it instead of restarting.
+	close(unblock)
+	buf := make([]byte, len(data))
+	if n, err := entry.ReadAt(context.Background(), buf, 0); err != nil || n != len(data) || !bytes.Equal(buf, data) {
+		t.Fatalf("retry after cancelled reader: n=%d err=%v", n, err)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("source requests = %d, want 1: a cancelled reader restarted the chunk download", got)
+	}
+}
+
+func TestSourceCacheEvictsInactiveRevision(t *testing.T) {
+	data := bytes.Repeat([]byte("x"), 16)
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "source.mkv", time.Time{}, bytes.NewReader(data))
+	}))
+	defer origin.Close()
+	store, err := newSourceStore(t.TempDir(), 16, 8, origin.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := store.acquire("old", origin.URL, int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.ReadAt(context.Background(), make([]byte, 8), 0); err != nil {
+		t.Fatal(err)
+	}
+	oldDir := old.record.dir
+	store.release(old)
+
+	current, err := store.acquire("current", origin.URL, int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, offset := range []int64{0, 8} {
+		if _, err := current.ReadAt(context.Background(), make([]byte, 8), offset); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := os.Stat(oldDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("inactive revision was not evicted: %v", err)
+	}
+	if store.usedBytes > store.maxBytes {
+		t.Fatalf("cache used %d bytes over %d-byte limit", store.usedBytes, store.maxBytes)
+	}
+	store.release(current)
+}
+
+func TestSourceCacheRemovesCorruptMetadata(t *testing.T) {
+	root := t.TempDir()
+	id := strings.Repeat("a", sha256.Size*2)
+	dir := filepath.Join(root, id)
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "metadata.json"), []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, chunkName(0)), []byte("stale"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := newSourceStore(root, 16, 8, http.DefaultClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.usedBytes != 0 {
+		t.Fatalf("corrupt entry consumed %d cache bytes", store.usedBytes)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("corrupt cache entry was not removed: %v", err)
+	}
+}
