@@ -111,11 +111,17 @@ func (v Variant) resourcePrefix() string {
 // HDR10 and dual-layer profile 7 needs its enhancement layer, so both stay on
 // the Compatible variant.
 func (s *Session) DolbyVision() *DolbyVisionConfig {
-	dv := s.Index.DolbyVision
-	if s.Index.VideoCodec != "hevc" || dv == nil || dv.Profile != 5 || !dv.BL || !dv.RPU || dv.EL {
+	if !needsDolbyVision(s.Index) {
 		return nil
 	}
-	return dv
+	return s.Index.DolbyVision
+}
+
+// needsDolbyVision reports whether the source is single-layer Dolby Vision
+// profile 5, which only renders correctly through the DolbyVision variant.
+func needsDolbyVision(index Index) bool {
+	dv := index.DolbyVision
+	return index.VideoCodec == "hevc" && dv != nil && dv.Profile == 5 && dv.BL && dv.RPU && !dv.EL
 }
 
 // Tag names the session in logs. The ID is a bearer capability (it is the
@@ -434,8 +440,7 @@ func (m *Manager) probe(ctx context.Context, sourceURL string, size int64) (Inde
 		}
 		return Index{}, errors.New("could not read playback index")
 	}
-	if (index.VideoCodec != "hevc" && index.VideoCodec != "h264") ||
-		(index.AudioCodec != "truehd" && index.AudioCodec != "dts" && index.AudioCodec != "ac3" && index.AudioCodec != "eac3") {
+	if !needsConversion(index) {
 		return Index{}, ErrNotNeeded
 	}
 	if !validIndex(index) {
@@ -445,6 +450,25 @@ func (m *Manager) probe(ctx context.Context, sourceURL string, size int64) (Inde
 		return Index{}, errors.New("playback FFmpeg executable is unavailable")
 	}
 	return index, nil
+}
+
+// needsConversion reports whether a session is required to play the source.
+// Audio that Apple TV and browsers cannot decode (TrueHD, DTS, AC-3, E-AC-3)
+// needs AAC. Dolby Vision profile 5 needs a session whatever its audio:
+// without one, clients receive the raw file, and players that ignore the RPUs
+// (VLC) render its IPTPQc2 base layer green and magenta. Segments re-encode
+// any audio to AAC, so they need an audio track.
+func needsConversion(index Index) bool {
+	if index.VideoCodec != "hevc" && index.VideoCodec != "h264" {
+		return false
+	}
+	switch index.AudioCodec {
+	case "truehd", "dts", "ac3", "eac3":
+		return true
+	case "":
+		return false
+	}
+	return needsDolbyVision(index)
 }
 
 func validIndex(index Index) bool {

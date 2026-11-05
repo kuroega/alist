@@ -1182,3 +1182,51 @@ func TestFirstSegmentKeepsLateVideoStart(t *testing.T) {
 			first*1000, second*1000)
 	}
 }
+
+// Dolby Vision profile 5 needs the DolbyVision variant even when its audio
+// would play natively; otherwise clients get the raw file and VLC renders the
+// base layer green and magenta.
+func TestNeedsConversion(t *testing.T) {
+	p5 := &DolbyVisionConfig{Profile: 5, Level: 9, RPU: true, BL: true}
+	p8 := &DolbyVisionConfig{Profile: 8, Level: 6, RPU: true, BL: true, Compatibility: 1}
+	for _, tc := range []struct {
+		name  string
+		index Index
+		want  bool
+	}{
+		{"truehd", Index{VideoCodec: "hevc", AudioCodec: "truehd"}, true},
+		{"h264 eac3", Index{VideoCodec: "h264", AudioCodec: "eac3"}, true},
+		{"plain aac", Index{VideoCodec: "hevc", AudioCodec: "aac"}, false},
+		{"profile 5 aac", Index{VideoCodec: "hevc", AudioCodec: "aac", DolbyVision: p5}, true},
+		{"profile 5 opus", Index{VideoCodec: "hevc", AudioCodec: "a_opus", DolbyVision: p5}, true},
+		{"profile 5 without audio", Index{VideoCodec: "hevc", DolbyVision: p5}, false},
+		{"profile 8 aac", Index{VideoCodec: "hevc", AudioCodec: "aac", DolbyVision: p8}, false},
+		{"av1", Index{VideoCodec: "v_av1", AudioCodec: "truehd"}, false},
+	} {
+		if got := needsConversion(tc.index); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestOpenOffersDolbyVisionForProfile5WithAAC(t *testing.T) {
+	info, _, cues := testMetadata()
+	dvcc := []byte{1, 0, 0x0a, 0x4d, 0x00} // profile 5, level 9, RPU, base layer
+	// testMetadata's cues index video track 7.
+	video := testElement(0xAE, testUint(0xD7, 7), testUint(0x83, 1), testElement(0x86, []byte("V_MPEGH/ISO/HEVC")),
+		testElement(0x41E4, testUint(0x41F0, 1), testUint(0x41E7, 0x64766343), testElement(0x41ED, dvcc)))
+	data := testDocument(info, testElement(idTracks, testTrack(3, 2, "A_AAC"), video), cues)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "movie.mkv", time.Time{}, bytes.NewReader(data))
+	}))
+	defer server.Close()
+	m := NewManager(Config{FFmpeg: "ffmpeg", MaxSessions: 2, IdleTimeout: time.Minute})
+	defer m.Close()
+	session, err := m.Open(context.Background(), "u\x00/dv.mkv\x001:1", server.URL+"/p/dv.mkv?sign=test&internal_playback=1", int64(len(data)))
+	if err != nil {
+		t.Fatalf("profile 5 with AAC audio was not opened: %v", err)
+	}
+	if dv := session.DolbyVision(); dv == nil || dv.Profile != 5 || dv.Level != 9 {
+		t.Fatalf("session offers Dolby Vision %#v", dv)
+	}
+}
