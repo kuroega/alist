@@ -64,11 +64,23 @@ type DolbyVisionPlayback struct {
 	Level   uint8  `json:"level"`
 }
 
+// mayBeMatroska reports whether a file is worth probing for a playback
+// session. The name only narrows the candidates: releases are often Matroska
+// renamed to .mp4, so the probe decides from the EBML header and caches a
+// negative result for genuine MP4/QuickTime files.
+func mayBeMatroska(name string) bool {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".mkv", ".mp4", ".m4v", ".mov":
+		return true
+	}
+	return false
+}
+
 // compatiblePlaybackURL is called only after FsGet has checked the user's
 // path, roles and folder password. The opaque URL delegates that read access
 // to the media player until the session expires; it grants no browse access.
 func compatiblePlaybackURL(c *gin.Context, user *model.User, rawPath string, obj model.Obj) (string, *DolbyVisionPlayback, error) {
-	if playbackManager == nil || !conf.Conf.Playback.Enabled || !strings.EqualFold(path.Ext(obj.GetName()), ".mkv") {
+	if playbackManager == nil || !conf.Conf.Playback.Enabled || !mayBeMatroska(obj.GetName()) {
 		return "", nil, nil
 	}
 	port := conf.Conf.Scheme.HttpPort

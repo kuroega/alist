@@ -54,3 +54,17 @@ func TestPlaybackResponseLogKeepsServedSegmentsAtInfo(t *testing.T) {
 		t.Fatalf("served segment logged as %v", entry)
 	}
 }
+
+// Matroska releases are often named .mp4; the probe, not the name, decides.
+// A Dolby Vision profile 5 file named .mp4 previously skipped the session and
+// played its raw IPTPQc2 base layer in VLC (purple and green).
+func TestMayBeMatroska(t *testing.T) {
+	for name, want := range map[string]bool{
+		"movie.mkv": true, "S01E32.mp4": true, "SHOW.MP4": true, "clip.m4v": true, "clip.mov": true,
+		"index.m3u8": false, "poster.jpg": false, "sub.ass": false, "noext": false,
+	} {
+		if got := mayBeMatroska(name); got != want {
+			t.Errorf("%s: got %v, want %v", name, got, want)
+		}
+	}
+}

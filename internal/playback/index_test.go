@@ -275,3 +275,14 @@ func TestReadIndexMissingAudioAndDefaultScale(t *testing.T) {
 		t.Fatalf("wrong default scale or missing-audio behavior: %#v", index)
 	}
 }
+
+// Genuine MP4 files now reach the probe too (Matroska is often named .mp4);
+// they must be rejected as unsupported, which the manager reports as
+// ErrNotNeeded so FsGet keeps the raw URL.
+func TestReadIndexRejectsISOBMFF(t *testing.T) {
+	data := append([]byte{0, 0, 0, 0x18}, []byte("ftypisom\x00\x00\x02\x00isomiso2")...)
+	data = append(data, make([]byte, 4096)...)
+	if _, err := ReadIndex(bytes.NewReader(data), int64(len(data))); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("ISO BMFF source: got %v, want ErrUnsupported", err)
+	}
+}
